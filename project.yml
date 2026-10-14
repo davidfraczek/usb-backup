@@ -2,6 +2,7 @@ name: USBPhotoBackup
 
 options:
   bundleIdPrefix: pl.moja
+  developmentLanguage: en
   deploymentTarget:
     iOS: "17.0"
 
@@ -22,7 +23,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: USB Backup
-        NSPhotoLibraryUsageDescription: Aplikacja odczytuje zdjęcia i filmy, aby zrobić ich kopię na dysku zewnętrznym.
+        NSPhotoLibraryUsageDescription: This app reads your photos and videos to back them up to your external drive.
+        CFBundleLocalizations: [en, pl]
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
