@@ -46,6 +46,7 @@ struct ContentView: View {
     @State private var showingPicker = false
     @State private var showingSettings = false
     @State private var showingHistory = false
+    @State private var showErrors = true
     @AppStorage(Lang.storageKey) private var languageRaw = AppLanguage.system.rawValue
     @Environment(\.scenePhase) private var scenePhase
 
@@ -87,6 +88,16 @@ struct ContentView: View {
             SettingsView(manager: manager)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+        }
+        .alert(tr("Za mało miejsca na dysku", "Not enough space on the drive"),
+               isPresented: Binding(get: { manager.spaceShortfall != nil },
+                                    set: { if !$0 { manager.dismissShortfall() } }),
+               presenting: manager.spaceShortfall) { _ in
+            Button(tr("Kopiuj mimo to", "Copy anyway")) { manager.startAnyway() }
+            Button(tr("Anuluj", "Cancel"), role: .cancel) { }
+        } message: { shortfall in
+            Text(tr("Do skopiowania jest ok. \(formatBytes(shortfall.needed)), a na dysku wolne jest \(formatBytes(shortfall.free)) (brakuje ok. \(formatBytes(shortfall.needed - shortfall.free))). Zwolnij miejsce albo wybierz większy dysk.\n\nMożesz też skopiować mimo to: pliki są zapisywane od najstarszych, a kopia zatrzyma się, gdy skończy się miejsce.",
+                    "About \(formatBytes(shortfall.needed)) needs to be copied, but only \(formatBytes(shortfall.free)) is free on the drive (about \(formatBytes(shortfall.needed - shortfall.free)) short). Free up space or use a larger drive.\n\nYou can also copy anyway: files are written oldest first, and the backup stops when the drive is full."))
         }
         .sheet(isPresented: $showingHistory) {
             HistoryView(manager: manager)
@@ -406,6 +417,8 @@ struct ContentView: View {
             scanningCard(checked: checked, total: total)
         case .copying(let index, let total, let name):
             copyingCard(index: index, total: total, name: name)
+        case .verifying(let checked, let total):
+            verifyingCard(checked: checked, total: total)
         case .finished:
             VStack(spacing: 12) {
                 messageCard(icon: "checkmark.circle.fill", tint: .green,
@@ -432,9 +445,28 @@ struct ContentView: View {
     private var finishedTitle: String {
         guard let s = manager.summary else { return tr("Kopia zakończona", "Backup complete") }
         if s.failedAssets > 0 { return tr("Kopia zakończona z błędami", "Backup finished with errors") }
-        return s.copiedAssets == 0
-            ? tr("Wszystko już skopiowane", "Everything is already backed up")
+        if s.copiedAssets == 0 { return tr("Wszystko już skopiowane", "Everything is already backed up") }
+        return s.verifiedFiles > 0
+            ? tr("Skopiowano i zweryfikowano", "Copied and verified")
             : tr("Kopia zakończona", "Backup complete")
+    }
+
+    private func verifyingCard(checked: Int, total: Int) -> some View {
+        Card {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text(tr("Weryfikuję kopię…", "Verifying the backup…"))
+                        .font(.system(.headline, design: .rounded))
+                }
+                ProgressView(value: Double(checked), total: Double(max(total, 1)))
+                    .tint(.green)
+                Text(tr("Sprawdzono \(checked) z \(total) plików (porównanie rozmiaru z oryginałem)",
+                        "Checked \(checked) of \(total) files (size compared with the original)"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func scanningCard(checked: Int, total: Int) -> some View {
@@ -516,6 +548,14 @@ struct ContentView: View {
                                tr("\(s.copiedAssets) elementów · \(formatBytes(s.bytesCopied))",
                                   "\(s.copiedAssets) items · \(formatBytes(s.bytesCopied))"))
                     summaryRow(tr("Już na dysku", "Already on drive"), "\(s.alreadyBackedUp)")
+                    if s.verifiedFiles > 0 || s.verifyFailed > 0 {
+                        summaryRow(tr("Weryfikacja", "Verification"),
+                                   s.verifyFailed == 0
+                                   ? tr("✓ \(s.verifiedFiles) plików zgodnych", "✓ \(s.verifiedFiles) files match")
+                                   : tr("\(s.verifyFailed) niezgodnych z \(s.verifiedFiles + s.verifyFailed)",
+                                        "\(s.verifyFailed) of \(s.verifiedFiles + s.verifyFailed) don't match"),
+                                   tint: s.verifyFailed == 0 ? .green : .red)
+                    }
                     if let warning = s.markerWarning {
                         Label(warning, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
@@ -523,13 +563,35 @@ struct ContentView: View {
                     }
                     if s.failedAssets > 0 {
                         summaryRow(tr("Błędy", "Errors"), "\(s.failedAssets)", tint: .red)
-                        DisclosureGroup(tr("Pokaż szczegóły błędów", "Show error details")) {
+                        DisclosureGroup(isExpanded: $showErrors) {
                             VStack(alignment: .leading, spacing: 4) {
                                 ForEach(s.errors, id: \.self) { Text($0).font(.caption) }
+                                if s.failedAssets > s.errors.count {
+                                    Text(tr("…i kolejne (lista pokazuje pierwsze \(s.errors.count))",
+                                            "…and more (the list shows the first \(s.errors.count))"))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
+                        } label: {
+                            Text(tr("Szczegóły błędów", "Error details"))
                         }
                         .font(.subheadline)
+                    }
+                    if !s.failedAssetIDs.isEmpty {
+                        Button {
+                            manager.retryFailed()
+                        } label: {
+                            Label(tr("Spróbuj ponownie (\(s.failedAssetIDs.count))", "Try again (\(s.failedAssetIDs.count))"),
+                                  systemImage: "arrow.clockwise")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.large)
+                        .disabled(manager.isRunning)
+                        .padding(.top, 4)
                     }
                 }
             }
@@ -566,6 +628,17 @@ struct ContentView: View {
 
     // MARK: Buttons
 
+    private var isVerifying: Bool {
+        if case .verifying = manager.phase { return true }
+        return false
+    }
+
+    /// The last analysis says the backup is bigger than the free space on the drive.
+    private var notEnoughSpace: Bool {
+        guard let plan = manager.plan, let free = manager.drive?.availableBytes else { return false }
+        return plan.pendingBytes > free
+    }
+
     @ViewBuilder
     private var actionButtons: some View {
         VStack(spacing: 12) {
@@ -577,7 +650,7 @@ struct ContentView: View {
                           systemImage: "xmark")
                 }
                 .buttonStyle(PrimaryButtonStyle(colors: [.red, .orange]))
-                .disabled(manager.isCancelling)
+                .disabled(manager.isCancelling || isVerifying)
             } else if manager.isAnalyzing {
                 Button {
                 } label: {
@@ -595,9 +668,11 @@ struct ContentView: View {
                 Button {
                     manager.start()
                 } label: {
-                    Label(tr("Rozpocznij kopię", "Start backup"), systemImage: "arrow.up.circle.fill")
+                    Label(notEnoughSpace ? tr("Rozpocznij kopię (za mało miejsca)", "Start backup (not enough space)")
+                                         : tr("Rozpocznij kopię", "Start backup"),
+                          systemImage: notEnoughSpace ? "exclamationmark.triangle.fill" : "arrow.up.circle.fill")
                 }
-                .buttonStyle(PrimaryButtonStyle())
+                .buttonStyle(PrimaryButtonStyle(colors: notEnoughSpace ? [.orange, .red] : [.blue, .indigo]))
                 .disabled(manager.destinationURL == nil)
 
                 Button {

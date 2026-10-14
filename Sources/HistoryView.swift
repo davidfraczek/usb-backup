@@ -99,6 +99,16 @@ private struct RunRow: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+                if let verified = run.verifiedFiles {
+                    let failed = run.verifyFailed ?? 0
+                    Label(failed == 0
+                          ? tr("Zweryfikowano: \(verified) plików", "Verified: \(verified) files")
+                          : tr("Weryfikacja: \(failed) niezgodnych z \(verified + failed)", "Verification: \(failed) of \(verified + failed) don't match"),
+                          systemImage: failed == 0 ? "checkmark.seal.fill" : "xmark.seal.fill")
+                        .font(.caption)
+                        .foregroundStyle(failed == 0 ? Color.green : Color.red)
+                }
             }
         }
         .padding(.vertical, 4)

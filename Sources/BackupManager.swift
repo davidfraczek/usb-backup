@@ -32,6 +32,8 @@ struct RunRecord: Codable, Identifiable, Equatable, Sendable {
     var failedAssets: Int
     var bytesCopied: Int64
     var duration: TimeInterval
+    var verifiedFiles: Int?             // optional: older history entries don't have these fields
+    var verifyFailed: Int?
 }
 
 /// What we know about the selected drive.
@@ -72,11 +74,23 @@ struct BackupSummary: Sendable {
     var abortReason: String?
     var markerWarning: String?          // set when the "last backup" date could not be written to the drive
     var duration: TimeInterval = 0
+    var verifiedFiles = 0               // files whose size on the drive matches the original
+    var verifyFailed = 0                // files that failed the check (they are deleted, so the next run copies them again)
+    var failedAssetIDs: [String] = []   // PHAsset.localIdentifier of everything that failed – used by "Try again"
+    var blockedForSpace = false         // the run was not started because the drive is too small
+}
+
+/// The backup would not fit on the drive – the user is asked whether to go ahead anyway.
+struct SpaceShortfall: Equatable, Sendable {
+    var needed: Int64
+    var free: Int64
 }
 
 enum BackupEvent: Sendable {
     case scanning(checked: Int, total: Int)
     case planned(PlanInfo)
+    case verifying(checked: Int, total: Int)
+    case insufficientSpace(needed: Int64, free: Int64)
     case copying(index: Int, total: Int, name: String)
     case assetFraction(Double)      // 0...1 – files finished within the current asset
     case bytesCopied(Int64)         // bytes copied so far in this run
@@ -93,6 +107,7 @@ final class BackupManager: ObservableObject {
         case idle
         case scanning(checked: Int, total: Int)
         case copying(index: Int, total: Int, fileName: String)
+        case verifying(checked: Int, total: Int)
         case finished
         case cancelled
         case failed(String)
@@ -111,6 +126,7 @@ final class BackupManager: ObservableObject {
     @Published private(set) var analyzeOnly = false
     @Published private(set) var folderBytes: Int64?           // size of the chosen backup folder on the drive
     @Published private(set) var isMeasuringFolder = false
+    @Published private(set) var spaceShortfall: SpaceShortfall?   // set when a backup would not fit; the UI asks what to do
     @Published var options = BackupOptions.load() {
         didSet { optionsDidChange(oldValue) }
     }
@@ -124,12 +140,13 @@ final class BackupManager: ObservableObject {
     private var needsReanalysis = false
     private var copyStart: Date?
     private var copiedBytes: Int64 = 0
+    private var isRetryRun = false
 
     var folderName: String? { destinationURL?.lastPathComponent }
 
     var isRunning: Bool {
         switch phase {
-        case .scanning, .copying: return true
+        case .scanning, .copying, .verifying: return true
         default: return false
         }
     }
@@ -229,7 +246,29 @@ final class BackupManager: ObservableObject {
     // MARK: Start / analyze / cancel
 
     /// Full backup (scans, then copies what is missing).
-    func start() { launch(dryRun: false) }
+    /// If an earlier analysis already shows that it won't fit on the drive, nothing starts and the user is asked first.
+    func start() {
+        guard !isRunning else { return }
+        if let plan, let free = drive?.availableBytes, plan.pendingBytes > free {
+            spaceShortfall = SpaceShortfall(needed: plan.pendingBytes, free: free)
+            return
+        }
+        launch(dryRun: false)
+    }
+
+    /// The user confirmed: copy as much as fits (oldest items first), the run stops cleanly when the drive is full.
+    func startAnyway() {
+        spaceShortfall = nil
+        launch(dryRun: false, force: true)
+    }
+
+    func dismissShortfall() { spaceShortfall = nil }
+
+    /// Copies again only the items that failed in the last run (no new scan of the whole library).
+    func retryFailed() {
+        guard !isRunning, let ids = summary?.failedAssetIDs, !ids.isEmpty else { return }
+        launch(dryRun: false, retryIDs: ids)
+    }
 
     /// Only scans and works out how much is still to copy – nothing is written.
     func analyze() { launch(dryRun: true) }
@@ -263,9 +302,10 @@ final class BackupManager: ObservableObject {
         worker?.cancel()
     }
 
-    private func launch(dryRun: Bool) {
+    private func launch(dryRun: Bool, retryIDs: [String]? = nil, force: Bool = false) {
         guard !isRunning, let root = destinationURL else { return }
         if !dryRun { summary = nil }
+        isRetryRun = retryIDs != nil
         overallProgress = 0
         iCloudProgress = nil
         etaSeconds = nil
@@ -281,11 +321,11 @@ final class BackupManager: ObservableObject {
         phase = .scanning(checked: 0, total: 0)
         if !dryRun { UIApplication.shared.isIdleTimerDisabled = true }   // keep the screen awake while copying
         runTask = Task { [weak self] in
-            await self?.runBackup(root: root, dryRun: dryRun)
+            await self?.runBackup(root: root, dryRun: dryRun, retryIDs: retryIDs, force: force)
         }
     }
 
-    private func runBackup(root: URL, dryRun: Bool) async {
+    private func runBackup(root: URL, dryRun: Bool, retryIDs: [String]?, force: Bool) async {
         defer { UIApplication.shared.isIdleTimerDisabled = false }
 
         // 1. Photo Library permission (full access is required for a complete backup)
@@ -313,7 +353,8 @@ final class BackupManager: ObservableObject {
         let settings = options
         let (stream, continuation) = AsyncStream.makeStream(of: BackupEvent.self)
         worker = Task.detached(priority: .userInitiated) {
-            await BackupEngine.run(root: root, dryRun: dryRun, settings: settings, emit: { continuation.yield($0) })
+            await BackupEngine.run(root: root, dryRun: dryRun, settings: settings,
+                                   retryIDs: retryIDs, force: force, emit: { continuation.yield($0) })
             continuation.finish()
         }
 
@@ -335,6 +376,13 @@ final class BackupManager: ObservableObject {
         case .planned(let info):
             plan = info
 
+        case .verifying(let checked, let total):
+            phase = .verifying(checked: checked, total: total)
+            iCloudProgress = nil
+
+        case .insufficientSpace(let needed, let free):
+            spaceShortfall = SpaceShortfall(needed: needed, free: free)
+
         case .copying(let index, let total, let name):
             if copyStart == nil { copyStart = Date() }
             phase = .copying(index: index, total: total, fileName: name)
@@ -355,7 +403,7 @@ final class BackupManager: ObservableObject {
             if let fraction, fraction < 1 { iCloudProgress = fraction } else { iCloudProgress = nil }
 
         case .finished(let result):
-            if analyzeOnly {                 // analysis only: no result screen
+            if analyzeOnly || result.blockedForSpace {     // analysis only / not started because of missing space: no result screen
                 phase = .idle
                 return
             }
@@ -372,7 +420,7 @@ final class BackupManager: ObservableObject {
             } else {
                 overallProgress = 1
                 phase = .finished
-                if result.failedAssets == 0, let p = plan {
+                if result.failedAssets == 0, !isRetryRun, let p = plan {
                     plan = PlanInfo(totalAssets: p.totalAssets, alreadyBackedUp: p.totalAssets)
                 } else {
                     plan = nil
@@ -407,9 +455,62 @@ private struct PendingFile: @unchecked Sendable {
 }
 
 private struct PendingAsset: @unchecked Sendable {
+    let id: String               // PHAsset.localIdentifier
     let displayName: String
     let date: Date?
     let files: [PendingFile]
+}
+
+/// A file that was copied and still has to pass the final check.
+private struct VerifyItem: Sendable {
+    let assetID: String
+    let name: String
+    let url: URL
+    let expectedBytes: Int64
+}
+
+/// The file on the drive does not have the same size as the original.
+private struct VerificationError: LocalizedError {
+    let expected: Int64
+    let actual: Int64
+
+    var errorDescription: String? {
+        tr("Rozmiar pliku na dysku (\(actual) B) różni się od oryginału (\(expected) B).",
+           "The file size on the drive (\(actual) B) differs from the original (\(expected) B).")
+    }
+}
+
+/// Receives the data of one photo/video from iOS in chunks and writes it to the drive,
+/// counting the bytes – that count is the exact size of the original.
+private final class StreamSink: @unchecked Sendable {
+    private let handle: FileHandle
+    private(set) var written: Int64 = 0
+    private(set) var error: Error?
+
+    init(url: URL) throws {
+        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        handle = try FileHandle(forWritingTo: url)
+    }
+
+    func append(_ data: Data) {
+        guard error == nil else { return }          // after the first write error the rest is ignored
+        do {
+            try handle.write(contentsOf: data)
+            written += Int64(data.count)
+        } catch {
+            self.error = error
+        }
+    }
+
+    /// Flushes everything to the drive and closes the file.
+    func finish() throws {
+        defer { try? handle.close() }
+        try handle.synchronize()
+    }
+
+    func abort() { try? handle.close() }
 }
 
 /// Remembers which folders exist, so the "already backed up under another layout" check stays cheap on a slow USB drive.
@@ -435,9 +536,13 @@ enum BackupEngine {
     // MARK: Main entry
 
     /// `dryRun == true`: only scan and report what is missing (`.planned`), copy nothing.
+    /// `retryIDs != nil`: only those library items are processed (used by "Try again").
+    /// `force == true`: copy even if the estimate says the drive is too small.
     nonisolated static func run(root: URL,
                                 dryRun: Bool,
                                 settings: BackupOptions,
+                                retryIDs: [String]?,
+                                force: Bool,
                                 emit: @escaping @Sendable (BackupEvent) -> Void) async {
         var summary = BackupSummary()
         let fm = FileManager.default
@@ -457,7 +562,12 @@ enum BackupEngine {
         case .videos:
             options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.video.rawValue)
         }
-        let fetch = PHAsset.fetchAssets(with: options)
+        let fetch: PHFetchResult<PHAsset>
+        if let retryIDs {
+            fetch = PHAsset.fetchAssets(withLocalIdentifiers: retryIDs, options: options)
+        } else {
+            fetch = PHAsset.fetchAssets(with: options)
+        }
         let total = fetch.count
 
         // ---- 2. Plan: work out which files are not on the drive yet
@@ -476,7 +586,8 @@ enum BackupEngine {
             if plan.missing.isEmpty {
                 if plan.existing > 0 { summary.alreadyBackedUp += 1 }
             } else {
-                pending.append(PendingAsset(displayName: plan.name, date: asset.creationDate, files: plan.missing))
+                pending.append(PendingAsset(id: asset.localIdentifier, displayName: plan.name,
+                                            date: asset.creationDate, files: plan.missing))
                 info.pendingAssets += 1
                 info.pendingFiles += plan.missing.count
                 for file in plan.missing {
@@ -502,13 +613,23 @@ enum BackupEngine {
             return
         }
 
+        // Not enough room on the drive: don't start, let the user decide (see `BackupManager.startAnyway`).
+        // Only sizes iOS reports are counted, so the real need can be slightly higher.
+        if !force, info.pendingBytes > 0, let free = availableBytes(root: root), info.pendingBytes > free {
+            emit(.insufficientSpace(needed: info.pendingBytes, free: free))
+            summary.blockedForSpace = true
+            emit(.finished(summary))
+            return
+        }
+
         // Mark the run as started: if the app is closed mid-way, the drive still shows when it was last touched.
         if !pending.isEmpty {
-            _ = saveMarker(root: root, status: .inProgress, summary: summary)
+            _ = saveMarker(root: root, status: .inProgress, summary: summary, isRetry: retryIDs != nil)
         }
 
         // ---- 3. Copy
         let runStart = Date()
+        var verifyList: [VerifyItem] = []
         var consecutiveFailures = 0
         for (i, item) in pending.enumerated() {
             if Task.isCancelled { summary.cancelled = true; break }
@@ -527,6 +648,10 @@ enum BackupEngine {
 
                 for (j, file) in item.files.enumerated() {
                     let bytes = try await copy(file, date: item.date, fm: fm) { emit(.iCloud($0)) }
+                    verifyList.append(VerifyItem(assetID: item.id,
+                                                 name: file.destination.lastPathComponent,
+                                                 url: file.destination,
+                                                 expectedBytes: bytes))
                     summary.copiedFiles += 1
                     summary.bytesCopied += bytes
                     emit(.bytesCopied(summary.bytesCopied))
@@ -537,14 +662,49 @@ enum BackupEngine {
             } catch {
                 summary.failedAssets += 1
                 consecutiveFailures += 1
+                if summary.failedAssetIDs.count < 5000 { summary.failedAssetIDs.append(item.id) }
                 if summary.errors.count < 50 {
                     summary.errors.append("\(item.displayName): \(error.localizedDescription)")
+                }
+                if isOutOfSpace(error) {
+                    summary.abortReason = tr("Na dysku skończyło się miejsce. Skopiowano \(summary.copiedAssets) elementów. Zwolnij miejsce lub wybierz większy dysk i uruchom kopię ponownie.",
+                                             "The drive is full. \(summary.copiedAssets) items were copied. Free up space or use a larger drive, then run the backup again.")
+                    break
                 }
                 if consecutiveFailures >= 10 {
                     summary.abortReason = tr("Przerwano po 10 błędach z rzędu. Ostatni błąd: \(error.localizedDescription)",
                                                   "Stopped after 10 failures in a row. Last error: \(error.localizedDescription)")
                     break
                 }
+            }
+        }
+
+        // ---- 4. Verify: every copied file must still be on the drive with exactly the size of the original.
+        // A file that fails is deleted, so the next run copies it again (otherwise it would count as "already backed up").
+        if !verifyList.isEmpty, (try? root.checkResourceIsReachable()) == true {
+            var badAssets = Set<String>()
+            for (n, item) in verifyList.enumerated() {
+                let actual = (try? fm.attributesOfItem(atPath: item.url.path))
+                    .flatMap { ($0[.size] as? NSNumber)?.int64Value } ?? -1
+                if actual == item.expectedBytes {
+                    summary.verifiedFiles += 1
+                } else {
+                    summary.verifyFailed += 1
+                    badAssets.insert(item.assetID)
+                    try? fm.removeItem(at: item.url)
+                    if summary.errors.count < 50 {
+                        summary.errors.append("\(item.name): " + VerificationError(expected: item.expectedBytes, actual: max(actual, 0)).localizedDescription)
+                    }
+                }
+                if (n + 1) % 200 == 0 { emit(.verifying(checked: n + 1, total: verifyList.count)) }
+            }
+            emit(.verifying(checked: verifyList.count, total: verifyList.count))
+
+            // Items with a failed check count as failed, not as copied
+            for id in badAssets {
+                if !summary.failedAssetIDs.contains(id) { summary.failedAssetIDs.append(id) }
+                summary.failedAssets += 1
+                summary.copiedAssets = max(summary.copiedAssets - 1, 0)
             }
         }
 
@@ -560,7 +720,7 @@ enum BackupEngine {
             status = .completed
         }
         summary.duration = Date().timeIntervalSince(runStart)
-        summary.markerWarning = saveMarker(root: root, status: status, summary: summary)
+        summary.markerWarning = saveMarker(root: root, status: status, summary: summary, isRetry: retryIDs != nil)
 
         emit(.iCloud(nil))
         emit(.finished(summary))
@@ -643,7 +803,9 @@ enum BackupEngine {
     }
 
     /// Saves the run result in the app and on the drive. Returns a warning text if writing to the drive failed.
-    nonisolated private static func saveMarker(root: URL, status: LastRunStatus, summary: BackupSummary) -> String? {
+    /// `isRetry`: a "Try again" run only looked at the items that failed before, so on its own it proves
+    /// the whole backup is complete only if the previous run had finished (with errors) and nothing else was missing.
+    nonisolated private static func saveMarker(root: URL, status: LastRunStatus, summary: BackupSummary, isRetry: Bool) -> String? {
         let previous = loadMarker(root: root)
         let now = Date()
 
@@ -658,13 +820,16 @@ enum BackupEngine {
                                      copiedFiles: summary.copiedFiles,
                                      failedAssets: summary.failedAssets,
                                      bytesCopied: summary.bytesCopied,
-                                     duration: summary.duration), at: 0)
+                                     duration: summary.duration,
+                                     verifiedFiles: summary.verifiedFiles,
+                                     verifyFailed: summary.verifyFailed), at: 0)
             history = Array(history.prefix(historyLimit))
         }
 
         let marker = BackupMarker(lastRun: now,
                                   status: status.rawValue,
-                                  lastCompleted: status == .completed ? now : previous?.completed,
+                                  lastCompleted: (status == .completed && (!isRetry || previous?.statusValue == .completedWithErrors))
+                                      ? now : previous?.completed,
                                   copiedAssets: summary.copiedAssets,
                                   failedAssets: summary.failedAssets,
                                   history: history)
@@ -820,35 +985,77 @@ enum BackupEngine {
         try? fm.removeItem(at: temp)
 
         do {
-            try await writeResource(file.resource, to: temp, onDownload: onDownload)
+            // `expected` = number of bytes iOS delivered = the exact size of the original
+            let expected = try await writeResource(file.resource, to: temp, onDownload: onDownload)
+
+            // Check 1: what landed on the drive must have exactly that size
+            let onDrive = (try? fm.attributesOfItem(atPath: temp.path))
+                .flatMap { ($0[.size] as? NSNumber)?.int64Value } ?? -1
+            guard onDrive == expected else { throw VerificationError(expected: expected, actual: max(onDrive, 0)) }
+
             if let date {
                 try? fm.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: temp.path)
             }
             try fm.moveItem(at: temp, to: file.destination)
+            return expected
         } catch {
             try? fm.removeItem(at: temp)
             throw error
         }
-
-        let attrs = try? fm.attributesOfItem(atPath: file.destination.path)
-        return (attrs?[.size] as? NSNumber)?.int64Value ?? 0
     }
 
+    /// Streams the original data of the resource to `url` (downloading it from iCloud if necessary),
+    /// flushes it to the drive and returns the number of bytes received.
     nonisolated private static func writeResource(_ resource: PHAssetResource,
                                                   to url: URL,
-                                                  onDownload: @escaping @Sendable (Double) -> Void) async throws {
+                                                  onDownload: @escaping @Sendable (Double) -> Void) async throws -> Int64 {
+        let sink = try StreamSink(url: url)
+
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true            // fetch full-resolution original from iCloud
         options.progressHandler = { progress in onDownload(progress) }
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                PHAssetResourceManager.default().requestData(
+                    for: resource,
+                    options: options,
+                    dataReceivedHandler: { chunk in sink.append(chunk) },
+                    completionHandler: { error in
+                        if let error {
+                            continuation.resume(throwing: error)
+                        } else {
+                            continuation.resume()
+                        }
+                    })
             }
+        } catch {
+            sink.abort()
+            throw error
         }
+
+        if let writeError = sink.error {        // e.g. the drive is full
+            sink.abort()
+            throw writeError
+        }
+        try sink.finish()
+        return sink.written
+    }
+
+    // MARK: Helpers
+
+    nonisolated private static func availableBytes(root: URL) -> Int64? {
+        let values = try? root.resourceValues(forKeys: [.volumeAvailableCapacityKey,
+                                                        .volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacity.map { Int64($0) } ?? values?.volumeAvailableCapacityForImportantUsage
+    }
+
+    /// "No space left on the device" – as a Cocoa error (640) or a POSIX error (ENOSPC), also when wrapped inside another error.
+    nonisolated private static func isOutOfSpace(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileWriteOutOfSpaceError { return true }
+        if nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(ENOSPC) { return true }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error { return isOutOfSpace(underlying) }
+        return false
     }
 }
