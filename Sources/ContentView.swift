@@ -1,21 +1,38 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Helpers
+// MARK: - Helpers (localized formatting)
 
-private func formatBytes(_ bytes: Int64) -> String {
-    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+func formatBytes(_ bytes: Int64) -> String {
+    let units = ["B", "KB", "MB", "GB", "TB"]
+    var value = Double(bytes)
+    var index = 0
+    while value >= 1000 && index < units.count - 1 {
+        value /= 1000
+        index += 1
+    }
+    let digits: ClosedRange<Int> = index == 0 ? 0...0 : (value < 10 ? 0...2 : 0...1)
+    let number = value.formatted(.number.precision(.fractionLength(digits)).locale(Lang.locale))
+    return number + " " + units[index]
 }
 
 private func relativeText(_ date: Date) -> String {
     let formatter = RelativeDateTimeFormatter()
+    formatter.locale = Lang.locale
     formatter.unitsStyle = .full
     formatter.dateTimeStyle = .named
     return formatter.localizedString(for: date, relativeTo: Date())
 }
 
-private func durationText(_ seconds: TimeInterval) -> String {
+func formatDate(_ date: Date) -> String {
+    date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: Lang.locale))
+}
+
+func durationText(_ seconds: TimeInterval) -> String {
+    var calendar = Calendar.current
+    calendar.locale = Lang.locale
     let formatter = DateComponentsFormatter()
+    formatter.calendar = calendar
     formatter.allowedUnits = [.hour, .minute, .second]
     formatter.unitsStyle = .abbreviated
     formatter.maximumUnitCount = 2
@@ -27,6 +44,9 @@ private func durationText(_ seconds: TimeInterval) -> String {
 struct ContentView: View {
     @StateObject private var manager = BackupManager()
     @State private var showingPicker = false
+    @State private var showingSettings = false
+    @State private var showingHistory = false
+    @AppStorage(Lang.storageKey) private var languageRaw = AppLanguage.system.rawValue
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -38,6 +58,7 @@ struct ContentView: View {
                     driveCard
                     if manager.destinationURL != nil {
                         statsGrid
+                        historyButton
                         spaceWarning
                     }
                     statusCard
@@ -49,6 +70,7 @@ struct ContentView: View {
             }
             .scrollIndicators(.hidden)
         }
+        .environment(\.locale, Lang.localeForCode(languageRaw))
         .fileImporter(
             isPresented: $showingPicker,
             allowedContentTypes: [.folder],
@@ -60,6 +82,17 @@ struct ContentView: View {
             case .failure(let error):
                 manager.reportError(error)
             }
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(manager: manager)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showingHistory) {
+            HistoryView(manager: manager)
+                .environment(\.locale, Lang.localeForCode(languageRaw))
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
         .onAppear {
             manager.refreshDriveInfo()
@@ -115,11 +148,23 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("USB Backup")
                     .font(.system(.title, design: .rounded, weight: .bold))
-                Text("Kopia zdjęć i filmów na pendrive")
+                Text(tr("Kopia zdjęć i filmów na pendrive", "Back up photos and videos to a USB drive"))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
             Spacer()
+            Button {
+                showingSettings = true
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, height: 44)
+                    .background(.regularMaterial, in: Circle())
+            }
+            .disabled(manager.isCopying)
+            .accessibilityLabel(tr("Ustawienia", "Settings"))
         }
         .padding(.top, 8)
     }
@@ -127,10 +172,10 @@ struct ContentView: View {
     // MARK: Drive card
 
     private var driveSubtitle: String {
-        if let name = manager.drive?.volumeName { return "Dysk: \(name)" }
+        if let name = manager.drive?.volumeName { return tr("Dysk: \(name)", "Drive: \(name)") }
         return manager.destinationURL == nil
-            ? "Podłącz pendrive lub dysk SSD i wybierz folder"
-            : "Brak połączenia z dyskiem"
+            ? tr("Podłącz pendrive lub dysk SSD i wybierz folder", "Plug in a USB drive or SSD and choose a folder")
+            : tr("Brak połączenia z dyskiem", "Drive not connected")
     }
 
     private var driveCard: some View {
@@ -144,16 +189,16 @@ struct ContentView: View {
                         .background(Color.indigo.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(manager.folderName ?? "Nie wybrano folderu")
+                        Text(manager.folderName ?? tr("Nie wybrano folderu", "No folder selected"))
                             .font(.system(.headline, design: .rounded))
                             .lineLimit(1)
                         Text(driveSubtitle)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                            .lineLimit(2)
                     }
                     Spacer()
-                    Button(manager.destinationURL == nil ? "Wybierz" : "Zmień") {
+                    Button(manager.destinationURL == nil ? tr("Wybierz", "Choose") : tr("Zmień", "Change")) {
                         showingPicker = true
                     }
                     .buttonStyle(.bordered)
@@ -163,20 +208,40 @@ struct ContentView: View {
                 }
 
                 if let drive = manager.drive, let total = drive.totalBytes, let available = drive.availableBytes, total > 0 {
+                    let used = max(total - available, 0)
+                    let folder = min(manager.folderBytes ?? 0, used)
+                    let planned = manager.plan?.pendingBytes ?? 0
+
                     VStack(alignment: .leading, spacing: 10) {
-                        CapacityBar(total: total, available: available, planned: manager.plan?.pendingBytes ?? 0)
-                        HStack(spacing: 14) {
-                            LegendDot(color: .gray.opacity(0.55), text: "Zajęte \(formatBytes(max(total - available, 0)))")
-                            if let planned = manager.plan?.pendingBytes, planned > 0 {
-                                LegendDot(color: planned > available ? .red : .indigo, text: "Kopia \(formatBytes(planned))")
+                        CapacityBar(total: total, available: available, folder: folder, planned: planned)
+
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8, alignment: .leading)],
+                                  alignment: .leading, spacing: 6) {
+                            if manager.folderBytes != nil {
+                                LegendDot(color: .indigo,
+                                          text: tr("Folder kopii \(formatBytes(folder))",
+                                                   "Backup folder \(formatBytes(folder))"))
+                            } else if manager.isMeasuringFolder {
+                                LegendDot(color: .indigo,
+                                          text: tr("Folder kopii: liczę…", "Backup folder: counting…"))
                             }
-                            LegendDot(color: Color(.systemFill), text: "Wolne \(formatBytes(available))")
+                            LegendDot(color: .gray.opacity(0.55),
+                                      text: tr("Inne pliki \(formatBytes(max(used - folder, 0)))",
+                                               "Other files \(formatBytes(max(used - folder, 0)))"))
+                            if planned > 0 {
+                                LegendDot(color: planned > available ? .red : .cyan,
+                                          text: tr("Nowa kopia \(formatBytes(planned))",
+                                                   "New backup \(formatBytes(planned))"))
+                            }
+                            LegendDot(color: Color(.systemFill),
+                                      text: tr("Wolne \(formatBytes(available))", "Free \(formatBytes(available))"))
                         }
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     }
                 } else if manager.destinationURL != nil {
-                    Label("Nie można odczytać dysku. Podłącz go i dotknij „Sprawdź, ile zostało”.",
+                    Label(tr("Nie można odczytać dysku. Podłącz go i dotknij „Sprawdź, ile zostało”.",
+                             "Can't read the drive. Plug it in and tap “Check what's left”."),
                           systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -199,80 +264,121 @@ struct ContentView: View {
         }
     }
 
+    private var historyButton: some View {
+        Button {
+            showingHistory = true
+        } label: {
+            Card {
+                HStack(spacing: 12) {
+                    Image(systemName: "list.bullet.clipboard")
+                        .font(.title3)
+                        .foregroundStyle(.indigo)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Historia kopii", "Backup history"))
+                            .font(.system(.headline, design: .rounded))
+                            .foregroundStyle(.primary)
+                        Text(historySubtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var historySubtitle: String {
+        let count = manager.drive?.history.count ?? 0
+        if manager.drive?.totalBytes == nil { return tr("Podłącz dysk, aby zobaczyć historię", "Plug in the drive to see the history") }
+        if count == 0 { return tr("Brak zapisanych przebiegów", "No runs recorded yet") }
+        return tr("Zapisanych przebiegów: \(count)", "Recorded runs: \(count)")
+    }
+
     private var freeSpaceTile: some View {
         let available = manager.drive?.availableBytes
         let total = manager.drive?.totalBytes
         return StatTile(icon: "internaldrive",
-                        title: "Wolne miejsce",
+                        title: tr("Wolne miejsce", "Free space"),
                         value: available.map { formatBytes($0) } ?? "—",
-                        subtitle: total.map { "z \(formatBytes($0))" },
+                        subtitle: total.map { tr("z \(formatBytes($0))", "of \(formatBytes($0))") },
                         tint: .green)
     }
 
     private var backupSizeTile: some View {
         var value = "—"
-        var subtitle: String? = "Dotknij „Sprawdź, ile zostało”"
+        var subtitle: String? = tr("Dotknij „Sprawdź, ile zostało”", "Tap “Check what's left”")
         var tint: Color = .blue
 
         if manager.isAnalyzing {
-            value = "Liczę…"
-            subtitle = "Analiza biblioteki"
+            value = tr("Liczę…", "Counting…")
+            subtitle = tr("Analiza biblioteki", "Analyzing library")
         } else if let plan = manager.plan {
             if plan.pendingAssets == 0 {
                 value = "0 B"
-                subtitle = "Wszystko już skopiowane"
+                subtitle = tr("Wszystko już skopiowane", "Everything is already backed up")
                 tint = .green
             } else {
                 value = (plan.unknownSizeFiles > 0 ? "~" : "") + formatBytes(plan.pendingBytes)
-                subtitle = "\(plan.pendingAssets) nowych elementów" + (plan.unknownSizeFiles > 0 ? " (część rozmiarów nieznana)" : "")
+                subtitle = tr("\(plan.pendingAssets) nowych elementów", "\(plan.pendingAssets) new items")
+                    + (plan.unknownSizeFiles > 0 ? tr(" (część rozmiarów nieznana)", " (some sizes unknown)") : "")
                 if let free = manager.drive?.availableBytes, plan.pendingBytes > free { tint = .red }
             }
         }
-        return StatTile(icon: "arrow.down.doc", title: "Rozmiar kopii", value: value, subtitle: subtitle, tint: tint)
+        return StatTile(icon: "arrow.down.doc",
+                        title: tr("Rozmiar kopii", "Backup size"),
+                        value: value,
+                        subtitle: subtitle,
+                        tint: tint)
     }
 
     private var lastBackupTile: some View {
-        var value = "Brak"
-        var subtitle: String? = "Na tym dysku nie wykonano jeszcze kopii"
+        var value = tr("Brak", "None")
+        var subtitle: String? = tr("Na tym dysku nie wykonano jeszcze kopii", "No backup has been made on this drive yet")
         var tint: Color = .purple
         let drive = manager.drive
 
         if manager.isCopying {
-            value = "W toku…"
-            subtitle = "Kopia właśnie trwa"
+            value = tr("W toku…", "In progress…")
+            subtitle = tr("Kopia właśnie trwa", "A backup is running")
             tint = .blue
         } else if drive?.totalBytes == nil {
             value = "—"
-            subtitle = "Podłącz dysk, aby zobaczyć datę"
+            subtitle = tr("Podłącz dysk, aby zobaczyć datę", "Plug in the drive to see the date")
         } else if let run = drive?.lastRun, let status = drive?.lastRunStatus {
-            let when = run.formatted(date: .abbreviated, time: .shortened)
+            let when = formatDate(run)
             value = relativeText(run)
             switch status {
             case .completed:
                 subtitle = when
             case .completedWithErrors:
-                subtitle = "Z błędami (\(drive?.lastRunFailed ?? 0)) · \(when)"
+                let failed = drive?.lastRunFailed ?? 0
+                subtitle = tr("Z błędami (\(failed)) · \(when)", "With errors (\(failed)) · \(when)")
                 tint = .orange
             case .cancelled:
-                subtitle = "Anulowana · \(when)"
+                subtitle = tr("Anulowana · \(when)", "Cancelled · \(when)")
                 tint = .orange
             case .aborted:
-                subtitle = "Przerwana · \(when)"
+                subtitle = tr("Przerwana · \(when)", "Interrupted · \(when)")
                 tint = .orange
             case .inProgress:
-                subtitle = "Przerwana nagle · \(when)"
+                subtitle = tr("Przerwana nagle · \(when)", "Stopped unexpectedly · \(when)")
                 tint = .orange
             }
             if status != .completed {
                 if let done = drive?.lastCompleted {
-                    subtitle = (subtitle ?? "") + "\nOstatnia pełna: \(relativeText(done))"
+                    subtitle = (subtitle ?? "") + "\n" + tr("Ostatnia pełna: \(relativeText(done))",
+                                                            "Last complete: \(relativeText(done))")
                 } else {
-                    subtitle = (subtitle ?? "") + "\nNie było jeszcze pełnej kopii"
+                    subtitle = (subtitle ?? "") + "\n" + tr("Nie było jeszcze pełnej kopii", "No complete backup yet")
                 }
             }
         }
         return StatTile(icon: "clock.arrow.circlepath",
-                        title: "Ostatnia kopia",
+                        title: tr("Ostatnia kopia", "Last backup"),
                         value: value,
                         subtitle: subtitle,
                         tint: tint)
@@ -283,8 +389,9 @@ struct ContentView: View {
         if let plan = manager.plan, let free = manager.drive?.availableBytes, plan.pendingBytes > free {
             messageCard(icon: "exclamationmark.triangle.fill",
                         tint: .red,
-                        title: "Za mało miejsca na dysku",
-                        text: "Potrzeba ok. \(formatBytes(plan.pendingBytes)), wolne jest \(formatBytes(free)). Zwolnij miejsce lub wybierz większy dysk.")
+                        title: tr("Za mało miejsca na dysku", "Not enough space on the drive"),
+                        text: tr("Potrzeba ok. \(formatBytes(plan.pendingBytes)), wolne jest \(formatBytes(free)). Zwolnij miejsce lub wybierz większy dysk.",
+                                 "About \(formatBytes(plan.pendingBytes)) needed, \(formatBytes(free)) free. Free up space or use a larger drive."))
         }
     }
 
@@ -308,23 +415,26 @@ struct ContentView: View {
         case .cancelled:
             VStack(spacing: 12) {
                 messageCard(icon: "stop.circle.fill", tint: .orange,
-                            title: "Kopia anulowana",
-                            text: "Uruchom ją ponownie – wznowi od miejsca przerwania.")
+                            title: tr("Kopia anulowana", "Backup cancelled"),
+                            text: tr("Uruchom ją ponownie – wznowi od miejsca przerwania.",
+                                     "Run it again – it will resume where it stopped."))
                 summaryCard
             }
         case .failed(let message):
             VStack(spacing: 12) {
                 messageCard(icon: "exclamationmark.triangle.fill", tint: .red,
-                            title: "Coś poszło nie tak", text: message)
+                            title: tr("Coś poszło nie tak", "Something went wrong"), text: message)
                 summaryCard
             }
         }
     }
 
     private var finishedTitle: String {
-        guard let s = manager.summary else { return "Kopia zakończona" }
-        if s.failedAssets > 0 { return "Kopia zakończona z błędami" }
-        return s.copiedAssets == 0 ? "Wszystko już skopiowane" : "Kopia zakończona"
+        guard let s = manager.summary else { return tr("Kopia zakończona", "Backup complete") }
+        if s.failedAssets > 0 { return tr("Kopia zakończona z błędami", "Backup finished with errors") }
+        return s.copiedAssets == 0
+            ? tr("Wszystko już skopiowane", "Everything is already backed up")
+            : tr("Kopia zakończona", "Backup complete")
     }
 
     private func scanningCard(checked: Int, total: Int) -> some View {
@@ -332,13 +442,15 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
                     ProgressView()
-                    Text(manager.analyzeOnly ? "Analizuję bibliotekę i dysk…" : "Przygotowuję kopię…")
+                    Text(manager.analyzeOnly
+                         ? tr("Analizuję bibliotekę i dysk…", "Analyzing library and drive…")
+                         : tr("Przygotowuję kopię…", "Preparing backup…"))
                         .font(.system(.headline, design: .rounded))
                 }
                 if total > 0 {
                     ProgressView(value: Double(checked), total: Double(max(total, 1)))
                         .tint(.indigo)
-                    Text("Sprawdzono \(checked) z \(total)")
+                    Text(tr("Sprawdzono \(checked) z \(total)", "Checked \(checked) of \(total)"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -355,7 +467,7 @@ struct ContentView: View {
 
                 HStack(spacing: 10) {
                     ProgressView()
-                    Text("Kopiowanie \(index) z \(total)")
+                    Text(tr("Kopiowanie \(index) z \(total)", "Copying \(index) of \(total)"))
                         .font(.system(.headline, design: .rounded))
                 }
 
@@ -373,14 +485,16 @@ struct ContentView: View {
                     }
                     Spacer()
                     if let eta = manager.etaSeconds {
-                        Label("Pozostało ok. \(durationText(eta))", systemImage: "clock")
+                        Label(tr("Pozostało ok. \(durationText(eta))", "About \(durationText(eta)) left"),
+                              systemImage: "clock")
                     }
                 }
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
 
                 if let f = manager.iCloudProgress {
-                    Label("Pobieranie z iCloud… \(Int(f * 100))%", systemImage: "icloud.and.arrow.down")
+                    Label(tr("Pobieranie z iCloud… \(Int(f * 100))%", "Downloading from iCloud… \(Int(f * 100))%"),
+                          systemImage: "icloud.and.arrow.down")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.blue)
                         .padding(.horizontal, 12)
@@ -396,18 +510,20 @@ struct ContentView: View {
         if let s = manager.summary {
             Card {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Podsumowanie")
+                    Text(tr("Podsumowanie", "Summary"))
                         .font(.system(.headline, design: .rounded))
-                    summaryRow("Skopiowano", "\(s.copiedAssets) elementów · \(formatBytes(s.bytesCopied))")
-                    summaryRow("Już na dysku", "\(s.alreadyBackedUp)")
+                    summaryRow(tr("Skopiowano", "Copied"),
+                               tr("\(s.copiedAssets) elementów · \(formatBytes(s.bytesCopied))",
+                                  "\(s.copiedAssets) items · \(formatBytes(s.bytesCopied))"))
+                    summaryRow(tr("Już na dysku", "Already on drive"), "\(s.alreadyBackedUp)")
                     if let warning = s.markerWarning {
                         Label(warning, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
                     if s.failedAssets > 0 {
-                        summaryRow("Błędy", "\(s.failedAssets)", tint: .red)
-                        DisclosureGroup("Pokaż szczegóły błędów") {
+                        summaryRow(tr("Błędy", "Errors"), "\(s.failedAssets)", tint: .red)
+                        DisclosureGroup(tr("Pokaż szczegóły błędów", "Show error details")) {
                             VStack(alignment: .leading, spacing: 4) {
                                 ForEach(s.errors, id: \.self) { Text($0).font(.caption) }
                             }
@@ -457,7 +573,8 @@ struct ContentView: View {
                 Button(role: .destructive) {
                     manager.cancel()
                 } label: {
-                    Label(manager.isCancelling ? "Anulowanie…" : "Anuluj kopię", systemImage: "xmark")
+                    Label(manager.isCancelling ? tr("Anulowanie…", "Cancelling…") : tr("Anuluj kopię", "Cancel backup"),
+                          systemImage: "xmark")
                 }
                 .buttonStyle(PrimaryButtonStyle(colors: [.red, .orange]))
                 .disabled(manager.isCancelling)
@@ -466,19 +583,19 @@ struct ContentView: View {
                 } label: {
                     HStack(spacing: 10) {
                         ProgressView().tint(.white)
-                        Text("Analizuję…")
+                        Text(tr("Analizuję…", "Analyzing…"))
                     }
                 }
                 .buttonStyle(PrimaryButtonStyle())
                 .disabled(true)
 
-                Button("Anuluj analizę") { manager.cancel() }
+                Button(tr("Anuluj analizę", "Cancel analysis")) { manager.cancel() }
                     .font(.subheadline)
             } else {
                 Button {
                     manager.start()
                 } label: {
-                    Label("Rozpocznij kopię", systemImage: "arrow.up.circle.fill")
+                    Label(tr("Rozpocznij kopię", "Start backup"), systemImage: "arrow.up.circle.fill")
                 }
                 .buttonStyle(PrimaryButtonStyle())
                 .disabled(manager.destinationURL == nil)
@@ -486,7 +603,7 @@ struct ContentView: View {
                 Button {
                     manager.analyze()
                 } label: {
-                    Label("Sprawdź, ile zostało", systemImage: "magnifyingglass")
+                    Label(tr("Sprawdź, ile zostało", "Check what's left"), systemImage: "magnifyingglass")
                         .font(.subheadline.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
@@ -565,28 +682,34 @@ private struct LegendDot: View {
     }
 }
 
-/// Used space | planned backup | free space, drawn as one capsule.
+/// Other files | existing backup folder | new backup (planned) | free space, drawn as one capsule.
 private struct CapacityBar: View {
     let total: Int64
     let available: Int64
+    let folder: Int64
     let planned: Int64
 
     var body: some View {
         GeometryReader { geo in
             let width = geo.size.width
             let totalValue = CGFloat(max(total, 1))
-            let used = CGFloat(max(total - available, 0))
+            let used = max(total - available, 0)
+            let other = CGFloat(max(used - folder, 0))
+            let folderValue = CGFloat(min(folder, used))
             let plannedClamped = CGFloat(min(planned, available))
             let overflow = planned > available
 
             HStack(spacing: 0) {
                 Rectangle()
                     .fill(Color.gray.opacity(0.55))
-                    .frame(width: width * used / totalValue)
+                    .frame(width: width * other / totalValue)
+                Rectangle()
+                    .fill(Color.indigo)
+                    .frame(width: width * folderValue / totalValue)
                 Rectangle()
                     .fill(overflow
                           ? AnyShapeStyle(Color.red)
-                          : AnyShapeStyle(LinearGradient(colors: [.blue, .indigo], startPoint: .leading, endPoint: .trailing)))
+                          : AnyShapeStyle(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing)))
                     .frame(width: width * plannedClamped / totalValue)
                 Spacer(minLength: 0)
             }

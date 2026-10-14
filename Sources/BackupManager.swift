@@ -22,6 +22,18 @@ enum LastRunStatus: String, Codable, Sendable {
     case aborted
 }
 
+/// One entry of the backup history (kept on the drive, in `.usb-backup-info.json`).
+struct RunRecord: Codable, Identifiable, Equatable, Sendable {
+    var id = UUID()
+    var date: Date
+    var status: LastRunStatus
+    var copiedAssets: Int
+    var copiedFiles: Int
+    var failedAssets: Int
+    var bytesCopied: Int64
+    var duration: TimeInterval
+}
+
 /// What we know about the selected drive.
 struct DriveInfo: Sendable, Equatable {
     var volumeName: String?
@@ -31,6 +43,7 @@ struct DriveInfo: Sendable, Equatable {
     var lastRunStatus: LastRunStatus?
     var lastRunFailed = 0
     var lastCompleted: Date?            // most recent run that finished without any problem
+    var history: [RunRecord] = []       // newest first
 }
 
 /// Small JSON file kept on the drive (`.usb-backup-info.json`) – a copy is also kept inside the app.
@@ -41,6 +54,7 @@ private struct BackupMarker: Codable {
     var copiedAssets: Int?
     var failedAssets: Int?
     var lastBackup: Date?               // legacy field written by the first version (= last fully successful run)
+    var history: [RunRecord]?           // newest first, at most `BackupEngine.historyLimit` entries
 
     var run: Date? { lastRun ?? lastBackup }
     var completed: Date? { lastCompleted ?? lastBackup }
@@ -57,6 +71,7 @@ struct BackupSummary: Sendable {
     var cancelled = false
     var abortReason: String?
     var markerWarning: String?          // set when the "last backup" date could not be written to the drive
+    var duration: TimeInterval = 0
 }
 
 enum BackupEvent: Sendable {
@@ -94,12 +109,19 @@ final class BackupManager: ObservableObject {
     @Published private(set) var etaSeconds: TimeInterval?
     @Published private(set) var speedBytesPerSecond: Double?
     @Published private(set) var analyzeOnly = false
+    @Published private(set) var folderBytes: Int64?           // size of the chosen backup folder on the drive
+    @Published private(set) var isMeasuringFolder = false
+    @Published var options = BackupOptions.load() {
+        didSet { optionsDidChange(oldValue) }
+    }
 
     private static let bookmarkKey = "backupDestinationBookmark"
     private var worker: Task<Void, Never>?
     private var runTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var isRefreshingDrive = false
+    private var measureGeneration = 0
+    private var needsReanalysis = false
     private var copyStart: Date?
     private var copiedBytes: Int64 = 0
 
@@ -126,6 +148,9 @@ final class BackupManager: ObservableObject {
         summary = nil
         plan = nil
         drive = nil
+        folderBytes = nil
+        isMeasuringFolder = false
+        measureGeneration += 1             // drops any measurement of the previous folder still in flight
         store(url)
         refreshDriveInfo()
         autoAnalyzeIfPossible()
@@ -143,7 +168,8 @@ final class BackupManager: ObservableObject {
             let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
             UserDefaults.standard.set(data, forKey: Self.bookmarkKey)
         } catch {
-            phase = .failed("Nie udało się zapamiętać folderu: \(error.localizedDescription)")
+            phase = .failed(tr("Nie udało się zapamiętać folderu: \(error.localizedDescription)",
+               "Couldn't remember the folder: \(error.localizedDescription)"))
         }
         destinationURL = url
     }
@@ -170,10 +196,28 @@ final class BackupManager: ObservableObject {
 
             let wasConnected = self.drive?.totalBytes != nil
             if self.drive != info { self.drive = info }
-            // The drive was just plugged in: analyze automatically (only if Photos access was already granted).
-            if !wasConnected, info.totalBytes != nil, self.plan == nil {
-                self.autoAnalyzeIfPossible()
+            // The drive was just plugged in: measure the backup folder and analyze automatically
+            // (the analysis only if Photos access was already granted).
+            if !wasConnected, info.totalBytes != nil {
+                self.measureBackupFolder()
+                if self.plan == nil { self.autoAnalyzeIfPossible() }
             }
+        }
+    }
+
+    /// Adds up the size of everything inside the chosen folder, in the background (a big folder on a slow USB drive can take a while).
+    func measureBackupFolder() {
+        guard let url = destinationURL, !isCopying else { return }
+        measureGeneration += 1
+        let generation = measureGeneration
+        isMeasuringFolder = true
+        Task {
+            let size = await Task.detached(priority: .utility) {
+                BackupEngine.folderSize(root: url)
+            }.value
+            guard generation == self.measureGeneration else { return }   // a newer measurement (or a backup run) superseded this one
+            self.isMeasuringFolder = false
+            if url == self.destinationURL, let size { self.folderBytes = size }
         }
     }
 
@@ -197,6 +241,22 @@ final class BackupManager: ObservableObject {
         launch(dryRun: true)
     }
 
+    /// Settings changed: the old estimate no longer applies, so it is recalculated (once nothing else is running).
+    private func optionsDidChange(_ old: BackupOptions) {
+        guard options != old else { return }
+        options.save()
+        plan = nil
+        needsReanalysis = true
+        runPendingReanalysis()
+    }
+
+    private func runPendingReanalysis() {
+        guard needsReanalysis, !isRunning else { return }
+        needsReanalysis = false
+        plan = nil
+        autoAnalyzeIfPossible()
+    }
+
     func cancel() {
         guard isRunning else { return }
         isCancelling = true
@@ -214,6 +274,10 @@ final class BackupManager: ObservableObject {
         copyStart = nil
         isCancelling = false
         analyzeOnly = dryRun
+        if !dryRun {
+            measureGeneration += 1          // a measurement started before the run would be outdated
+            isMeasuringFolder = false
+        }
         phase = .scanning(checked: 0, total: 0)
         if !dryRun { UIApplication.shared.isIdleTimerDisabled = true }   // keep the screen awake while copying
         runTask = Task { [weak self] in
@@ -230,7 +294,8 @@ final class BackupManager: ObservableObject {
             status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         }
         guard status == .authorized else {
-            phase = .failed("Potrzebny jest pełny dostęp do Zdjęć. Otwórz Ustawienia › Prywatność i ochrona › Zdjęcia i zezwól tej aplikacji na pełny dostęp.")
+            phase = .failed(tr("Potrzebny jest pełny dostęp do Zdjęć. Otwórz Ustawienia › Prywatność i ochrona › Zdjęcia i zezwól tej aplikacji na pełny dostęp.",
+                         "Full access to Photos is required. Open Settings › Privacy & Security › Photos and allow full access for this app."))
             return
         }
 
@@ -239,14 +304,16 @@ final class BackupManager: ObservableObject {
         defer { if scoped { root.stopAccessingSecurityScopedResource() } }
 
         guard (try? root.checkResourceIsReachable()) == true else {
-            phase = .failed("Nie można uzyskać dostępu do wybranego folderu. Podłącz dysk i wybierz folder ponownie.")
+            phase = .failed(tr("Nie można uzyskać dostępu do wybranego folderu. Podłącz dysk i wybierz folder ponownie.",
+                         "Can't access the selected folder. Plug in the drive and choose the folder again."))
             return
         }
 
         // 3. Run the engine off the main thread and listen to its events
+        let settings = options
         let (stream, continuation) = AsyncStream.makeStream(of: BackupEvent.self)
         worker = Task.detached(priority: .userInitiated) {
-            await BackupEngine.run(root: root, dryRun: dryRun, emit: { continuation.yield($0) })
+            await BackupEngine.run(root: root, dryRun: dryRun, settings: settings, emit: { continuation.yield($0) })
             continuation.finish()
         }
 
@@ -256,6 +323,8 @@ final class BackupManager: ObservableObject {
         if isRunning { phase = dryRun ? .idle : .finished }   // safety net
         isCancelling = false
         refreshDriveInfo()
+        if !dryRun { measureBackupFolder() }     // exact size of the backup folder after copying
+        if dryRun { runPendingReanalysis() }     // settings changed while the analysis was running
     }
 
     private func handle(_ event: BackupEvent) {
@@ -293,6 +362,7 @@ final class BackupManager: ObservableObject {
             summary = result
             iCloudProgress = nil
             etaSeconds = nil
+            if result.copiedFiles > 0 { folderBytes = (folderBytes ?? 0) + result.bytesCopied }   // instant estimate; exact value is measured right after the run
             if let reason = result.abortReason {
                 phase = .failed(reason)
                 plan = nil
@@ -342,18 +412,33 @@ private struct PendingAsset: @unchecked Sendable {
     let files: [PendingFile]
 }
 
+/// Remembers which folders exist, so the "already backed up under another layout" check stays cheap on a slow USB drive.
+private final class FolderCache {
+    private var known: [String: Bool] = [:]
+
+    func exists(_ url: URL, fm: FileManager) -> Bool {
+        if let cached = known[url.path] { return cached }
+        var isDirectory: ObjCBool = false
+        let result = fm.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        known[url.path] = result
+        return result
+    }
+}
+
 enum BackupEngine {
 
-    /// Also back up the edited (adjusted) version next to the original, named `<name>_edited.<ext>`.
-    nonisolated static let includeEditedVersions = true
     /// FAT/exFAT drives store timestamps with ~2 s resolution.
     nonisolated private static let dateTolerance: TimeInterval = 3
     nonisolated private static let markerName = ".usb-backup-info.json"
+    nonisolated static let historyLimit = 30
 
     // MARK: Main entry
 
     /// `dryRun == true`: only scan and report what is missing (`.planned`), copy nothing.
-    nonisolated static func run(root: URL, dryRun: Bool, emit: @escaping @Sendable (BackupEvent) -> Void) async {
+    nonisolated static func run(root: URL,
+                                dryRun: Bool,
+                                settings: BackupOptions,
+                                emit: @escaping @Sendable (BackupEvent) -> Void) async {
         var summary = BackupSummary()
         let fm = FileManager.default
 
@@ -362,15 +447,23 @@ enum BackupEngine {
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         options.includeHiddenAssets = true
         options.includeAllBurstAssets = true
-        options.predicate = NSPredicate(format: "mediaType == %d || mediaType == %d",
-                                        PHAssetMediaType.image.rawValue,
-                                        PHAssetMediaType.video.rawValue)
+        switch settings.media {
+        case .all:
+            options.predicate = NSPredicate(format: "mediaType == %d || mediaType == %d",
+                                            PHAssetMediaType.image.rawValue,
+                                            PHAssetMediaType.video.rawValue)
+        case .photos:
+            options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        case .videos:
+            options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.video.rawValue)
+        }
         let fetch = PHAsset.fetchAssets(with: options)
         let total = fetch.count
 
         // ---- 2. Plan: work out which files are not on the drive yet
         var pending: [PendingAsset] = []
         var reserved = Set<String>()
+        let folderCache = FolderCache()
         var info = PlanInfo()
         info.totalAssets = total
         var checked = 0
@@ -379,7 +472,7 @@ enum BackupEngine {
         fetch.enumerateObjects { asset, _, stop in
             if Task.isCancelled { stop.pointee = true; return }
 
-            let plan = planFiles(for: asset, root: root, fm: fm, reserved: &reserved)
+            let plan = planFiles(for: asset, root: root, fm: fm, settings: settings, cache: folderCache, reserved: &reserved)
             if plan.missing.isEmpty {
                 if plan.existing > 0 { summary.alreadyBackedUp += 1 }
             } else {
@@ -415,12 +508,14 @@ enum BackupEngine {
         }
 
         // ---- 3. Copy
+        let runStart = Date()
         var consecutiveFailures = 0
         for (i, item) in pending.enumerated() {
             if Task.isCancelled { summary.cancelled = true; break }
 
             guard (try? root.checkResourceIsReachable()) == true else {
-                summary.abortReason = "Dysk został odłączony. Skopiowano \(summary.copiedAssets) elementów, zanim kopia się zatrzymała. Podłącz go ponownie i uruchom kopię jeszcze raz – wznowi od miejsca przerwania."
+                summary.abortReason = tr("Dysk został odłączony. Skopiowano \(summary.copiedAssets) elementów, zanim kopia się zatrzymała. Podłącz go ponownie i uruchom kopię jeszcze raz – wznowi od miejsca przerwania.",
+                                              "The drive was disconnected. \(summary.copiedAssets) items were copied before the backup stopped. Plug it back in and run the backup again – it will resume where it stopped.")
                 break
             }
 
@@ -446,7 +541,8 @@ enum BackupEngine {
                     summary.errors.append("\(item.displayName): \(error.localizedDescription)")
                 }
                 if consecutiveFailures >= 10 {
-                    summary.abortReason = "Przerwano po 10 błędach z rzędu. Ostatni błąd: \(error.localizedDescription)"
+                    summary.abortReason = tr("Przerwano po 10 błędach z rzędu. Ostatni błąd: \(error.localizedDescription)",
+                                                  "Stopped after 10 failures in a row. Last error: \(error.localizedDescription)")
                     break
                 }
             }
@@ -463,6 +559,7 @@ enum BackupEngine {
         } else {
             status = .completed
         }
+        summary.duration = Date().timeIntervalSince(runStart)
         summary.markerWarning = saveMarker(root: root, status: status, summary: summary)
 
         emit(.iCloud(nil))
@@ -493,8 +590,28 @@ enum BackupEngine {
             info.lastRunStatus = marker.statusValue
             info.lastRunFailed = marker.failedAssets ?? 0
             info.lastCompleted = marker.completed
+            info.history = marker.history ?? []
         }
         return info
+    }
+
+    /// Total size of all files inside `root` (nil if the folder can't be read).
+    nonisolated static func folderSize(root: URL) -> Int64? {
+        let scoped = root.startAccessingSecurityScopedResource()
+        defer { if scoped { root.stopAccessingSecurityScopedResource() } }
+        guard (try? root.checkResourceIsReachable()) == true else { return nil }     // drive unplugged: don't report 0
+
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+        guard let enumerator = FileManager.default.enumerator(at: root,
+                                                              includingPropertiesForKeys: keys,
+                                                              options: [],
+                                                              errorHandler: { _, _ in true }) else { return nil }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { continue }
+            total += Int64(values.fileSize ?? 0)
+        }
+        return total
     }
 
     /// Reads the marker from the drive and from the app's own copy and merges them (newest run wins).
@@ -514,6 +631,14 @@ enum BackupEngine {
 
         guard var newest = found.max(by: { ($0.run ?? .distantPast) < ($1.run ?? .distantPast) }) else { return nil }
         newest.lastCompleted = found.compactMap { $0.completed }.max()
+
+        // History: union of both copies (matched by id), newest first
+        var seen = Set<UUID>()
+        newest.history = found.flatMap { $0.history ?? [] }
+            .filter { seen.insert($0.id).inserted }
+            .sorted { $0.date > $1.date }
+            .prefix(historyLimit)
+            .map { $0 }
         return newest
     }
 
@@ -521,16 +646,33 @@ enum BackupEngine {
     nonisolated private static func saveMarker(root: URL, status: LastRunStatus, summary: BackupSummary) -> String? {
         let previous = loadMarker(root: root)
         let now = Date()
+
+        // History: a run is recorded when it actually did something (copied files, had errors, was cancelled or aborted).
+        // A run that found nothing to copy only refreshes the "last backup" date, so the list isn't flooded.
+        var history = previous?.history ?? []
+        let didSomething = summary.copiedAssets > 0 || summary.failedAssets > 0 || status != .completed
+        if status != .inProgress, didSomething {
+            history.insert(RunRecord(date: now,
+                                     status: status,
+                                     copiedAssets: summary.copiedAssets,
+                                     copiedFiles: summary.copiedFiles,
+                                     failedAssets: summary.failedAssets,
+                                     bytesCopied: summary.bytesCopied,
+                                     duration: summary.duration), at: 0)
+            history = Array(history.prefix(historyLimit))
+        }
+
         let marker = BackupMarker(lastRun: now,
                                   status: status.rawValue,
                                   lastCompleted: status == .completed ? now : previous?.completed,
                                   copiedAssets: summary.copiedAssets,
-                                  failedAssets: summary.failedAssets)
+                                  failedAssets: summary.failedAssets,
+                                  history: history)
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(marker) else { return "Nie udało się zakodować daty kopii." }
+        guard let data = try? encoder.encode(marker) else { return tr("Nie udało się zakodować daty kopii.", "Couldn't encode the backup date.") }
 
         UserDefaults.standard.set(data, forKey: defaultsKey(for: root))
         do {
@@ -538,7 +680,8 @@ enum BackupEngine {
             try data.write(to: root.appendingPathComponent(markerName))
             return nil
         } catch {
-            return "Nie udało się zapisać daty kopii na dysku (\(error.localizedDescription)). Zapisano ją tylko w aplikacji."
+            return tr("Nie udało się zapisać daty kopii na dysku (\(error.localizedDescription)). Zapisano ją tylko w aplikacji.",
+                      "Couldn't write the backup date to the drive (\(error.localizedDescription)). It was saved in the app only.")
         }
     }
 
@@ -552,20 +695,28 @@ enum BackupEngine {
     nonisolated private static func planFiles(for asset: PHAsset,
                                               root: URL,
                                               fm: FileManager,
+                                              settings: BackupOptions,
+                                              cache: FolderCache,
                                               reserved: inout Set<String>) -> (missing: [PendingFile], existing: Int, name: String) {
         let resources = PHAssetResource.assetResources(for: asset)
         guard let primary = resources.first(where: { $0.type == .photo || $0.type == .video }) ?? resources.first else {
             return ([], 0, "")
         }
         let stem = (primary.originalFilename as NSString).deletingPathExtension
-        let folder = root.appendingPathComponent(monthFolderName(for: asset.creationDate), isDirectory: true)
+        let folder = folderURL(root: root, date: asset.creationDate, layout: settings.layout)
+        // Files backed up earlier under another folder layout still count as "already on the drive".
+        let alternateFolders = FolderLayout.allCases
+            .filter { $0 != settings.layout }
+            .map { folderURL(root: root, date: asset.creationDate, layout: $0) }
+            .filter { $0 != folder && cache.exists($0, fm: fm) }
 
         var missing: [PendingFile] = []
         var existing = 0
 
         for resource in resources {
-            guard let name = targetName(for: resource, stem: stem) else { continue }
-            let resolved = resolve(name: name, folder: folder, date: asset.creationDate, fm: fm, reserved: &reserved)
+            guard let name = targetName(for: resource, stem: stem, includeEdited: settings.includeEdited) else { continue }
+            let resolved = resolve(name: name, folder: folder, alternateFolders: alternateFolders,
+                                   date: asset.creationDate, fm: fm, reserved: &reserved)
             if resolved.exists {
                 existing += 1
             } else {
@@ -583,7 +734,7 @@ enum BackupEngine {
     }
 
     /// Which resources we save and what they are called. Live Photos get the same base name for HEIC/JPG + MOV.
-    nonisolated private static func targetName(for resource: PHAssetResource, stem: String) -> String? {
+    nonisolated private static func targetName(for resource: PHAssetResource, stem: String, includeEdited: Bool) -> String? {
         let ext = (resource.originalFilename as NSString).pathExtension
         switch resource.type {
         case .photo, .video, .alternatePhoto:          // originals (alternatePhoto = RAW of a RAW+JPEG pair)
@@ -591,9 +742,9 @@ enum BackupEngine {
         case .pairedVideo:                             // Live Photo video
             return stem + "." + (ext.isEmpty ? "MOV" : ext)
         case .fullSizePhoto:
-            return includeEditedVersions ? "\(stem)_edited." + (ext.isEmpty ? "jpg" : ext) : nil
+            return includeEdited ? "\(stem)_edited." + (ext.isEmpty ? "jpg" : ext) : nil
         case .fullSizeVideo, .fullSizePairedVideo:
-            return includeEditedVersions ? "\(stem)_edited." + (ext.isEmpty ? "mov" : ext) : nil
+            return includeEdited ? "\(stem)_edited." + (ext.isEmpty ? "mov" : ext) : nil
         default:                                       // adjustment data, thumbnails, audio …
             return nil
         }
@@ -604,6 +755,7 @@ enum BackupEngine {
     /// otherwise (e.g. IMG_0001 from a different phone) we pick `IMG_0001_1.HEIC`, and so on.
     nonisolated private static func resolve(name: String,
                                             folder: URL,
+                                            alternateFolders: [URL],
                                             date: Date?,
                                             fm: FileManager,
                                             reserved: inout Set<String>) -> (url: URL, exists: Bool) {
@@ -625,6 +777,15 @@ enum BackupEngine {
                 }
                 continue
             }
+
+            // Not in the current layout: maybe it was backed up earlier under another folder layout.
+            for alternate in alternateFolders {
+                let other = alternate.appendingPathComponent(candidate)
+                if fm.fileExists(atPath: other.path), looksLikeSameFile(other, date: date, fm: fm) {
+                    reserved.insert(key)
+                    return (other, true)
+                }
+            }
             reserved.insert(key)
             return (url, false)
         }
@@ -639,12 +800,12 @@ enum BackupEngine {
         return false
     }
 
-    nonisolated private static func monthFolderName(for date: Date?) -> String {
-        guard let date else { return "Unknown-Date" }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = .current
-        let c = calendar.dateComponents([.year, .month], from: date)
-        return String(format: "%04d-%02d", c.year ?? 0, c.month ?? 0)
+    nonisolated private static func folderURL(root: URL, date: Date?, layout: FolderLayout) -> URL {
+        var url = root
+        for part in layout.pathComponents(for: date) {
+            url.appendPathComponent(part, isDirectory: true)
+        }
+        return url
     }
 
     // MARK: Copying
