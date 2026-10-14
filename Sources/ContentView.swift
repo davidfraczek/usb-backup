@@ -65,8 +65,14 @@ struct ContentView: View {
             manager.refreshDriveInfo()
             manager.autoAnalyzeIfPossible()
         }
-        .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active, !manager.isRunning { manager.refreshDriveInfo() }
+        .task(id: scenePhase) {
+            // While the app is visible, re-check the drive every few seconds,
+            // so plugging it in (or removing it) is noticed without any tap.
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                await manager.pollDriveIfIdle()
+                try? await Task.sleep(for: .seconds(3))
+            }
         }
         .sensoryFeedback(trigger: manager.phase) { _, newPhase in
             feedback(for: newPhase)
@@ -226,13 +232,50 @@ struct ContentView: View {
     }
 
     private var lastBackupTile: some View {
-        let date = manager.drive?.lastBackup
+        var value = "Brak"
+        var subtitle: String? = "Na tym dysku nie wykonano jeszcze kopii"
+        var tint: Color = .purple
+        let drive = manager.drive
+
+        if manager.isCopying {
+            value = "W toku…"
+            subtitle = "Kopia właśnie trwa"
+            tint = .blue
+        } else if drive?.totalBytes == nil {
+            value = "—"
+            subtitle = "Podłącz dysk, aby zobaczyć datę"
+        } else if let run = drive?.lastRun, let status = drive?.lastRunStatus {
+            let when = run.formatted(date: .abbreviated, time: .shortened)
+            value = relativeText(run)
+            switch status {
+            case .completed:
+                subtitle = when
+            case .completedWithErrors:
+                subtitle = "Z błędami (\(drive?.lastRunFailed ?? 0)) · \(when)"
+                tint = .orange
+            case .cancelled:
+                subtitle = "Anulowana · \(when)"
+                tint = .orange
+            case .aborted:
+                subtitle = "Przerwana · \(when)"
+                tint = .orange
+            case .inProgress:
+                subtitle = "Przerwana nagle · \(when)"
+                tint = .orange
+            }
+            if status != .completed {
+                if let done = drive?.lastCompleted {
+                    subtitle = (subtitle ?? "") + "\nOstatnia pełna: \(relativeText(done))"
+                } else {
+                    subtitle = (subtitle ?? "") + "\nNie było jeszcze pełnej kopii"
+                }
+            }
+        }
         return StatTile(icon: "clock.arrow.circlepath",
                         title: "Ostatnia kopia",
-                        value: date.map { relativeText($0) } ?? "Brak",
-                        subtitle: date.map { $0.formatted(date: .abbreviated, time: .shortened) }
-                            ?? "Na tym dysku nie wykonano jeszcze kopii",
-                        tint: .purple)
+                        value: value,
+                        subtitle: subtitle,
+                        tint: tint)
     }
 
     @ViewBuilder
@@ -357,6 +400,11 @@ struct ContentView: View {
                         .font(.system(.headline, design: .rounded))
                     summaryRow("Skopiowano", "\(s.copiedAssets) elementów · \(formatBytes(s.bytesCopied))")
                     summaryRow("Już na dysku", "\(s.alreadyBackedUp)")
+                    if let warning = s.markerWarning {
+                        Label(warning, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                     if s.failedAssets > 0 {
                         summaryRow("Błędy", "\(s.failedAssets)", tint: .red)
                         DisclosureGroup("Pokaż szczegóły błędów") {
@@ -498,7 +546,7 @@ private struct StatTile: View {
                     Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineLimit(3)
                 }
             }
         }

@@ -13,17 +13,38 @@ struct PlanInfo: Sendable, Equatable {
     var alreadyBackedUp = 0
 }
 
+/// How the most recent backup run ended.
+enum LastRunStatus: String, Codable, Sendable {
+    case inProgress            // marker says "started" but never finished (app closed / killed)
+    case completed
+    case completedWithErrors
+    case cancelled
+    case aborted
+}
+
 /// What we know about the selected drive.
 struct DriveInfo: Sendable, Equatable {
     var volumeName: String?
     var totalBytes: Int64?
     var availableBytes: Int64?
-    var lastBackup: Date?
+    var lastRun: Date?                  // most recent run of any kind
+    var lastRunStatus: LastRunStatus?
+    var lastRunFailed = 0
+    var lastCompleted: Date?            // most recent run that finished without any problem
 }
 
+/// Small JSON file kept on the drive (`.usb-backup-info.json`) – a copy is also kept inside the app.
 private struct BackupMarker: Codable {
-    var lastBackup: Date
-    var copiedAssets: Int
+    var lastRun: Date?
+    var status: String?
+    var lastCompleted: Date?
+    var copiedAssets: Int?
+    var failedAssets: Int?
+    var lastBackup: Date?               // legacy field written by the first version (= last fully successful run)
+
+    var run: Date? { lastRun ?? lastBackup }
+    var completed: Date? { lastCompleted ?? lastBackup }
+    var statusValue: LastRunStatus { status.flatMap { LastRunStatus(rawValue: $0) } ?? .completed }
 }
 
 struct BackupSummary: Sendable {
@@ -35,6 +56,7 @@ struct BackupSummary: Sendable {
     var errors: [String] = []
     var cancelled = false
     var abortReason: String?
+    var markerWarning: String?          // set when the "last backup" date could not be written to the drive
 }
 
 enum BackupEvent: Sendable {
@@ -77,6 +99,7 @@ final class BackupManager: ObservableObject {
     private var worker: Task<Void, Never>?
     private var runTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private var isRefreshingDrive = false
     private var copyStart: Date?
     private var copiedBytes: Int64 = 0
 
@@ -136,13 +159,27 @@ final class BackupManager: ObservableObject {
 
     func refreshDriveInfo() {
         guard let url = destinationURL else { drive = nil; return }
-        refreshTask?.cancel()
+        guard !isRefreshingDrive else { return }          // a read is already in flight (USB can be slow)
+        isRefreshingDrive = true
         refreshTask = Task {
             let info = await Task.detached(priority: .utility) {
                 BackupEngine.readDriveInfo(root: url)
             }.value
-            if !Task.isCancelled { self.drive = info }
+            self.isRefreshingDrive = false
+            guard url == self.destinationURL else { return }   // folder was changed meanwhile
+
+            let wasConnected = self.drive?.totalBytes != nil
+            if self.drive != info { self.drive = info }
+            // The drive was just plugged in: analyze automatically (only if Photos access was already granted).
+            if !wasConnected, info.totalBytes != nil, self.plan == nil {
+                self.autoAnalyzeIfPossible()
+            }
         }
+    }
+
+    /// Called every few seconds while the app is visible, so plugging in the drive is noticed without any tap.
+    func pollDriveIfIdle() {
+        if !isRunning { refreshDriveInfo() }
     }
 
     // MARK: Start / analyze / cancel
@@ -372,6 +409,11 @@ enum BackupEngine {
             return
         }
 
+        // Mark the run as started: if the app is closed mid-way, the drive still shows when it was last touched.
+        if !pending.isEmpty {
+            _ = saveMarker(root: root, status: .inProgress, summary: summary)
+        }
+
         // ---- 3. Copy
         var consecutiveFailures = 0
         for (i, item) in pending.enumerated() {
@@ -410,10 +452,18 @@ enum BackupEngine {
             }
         }
 
-        // Remember when the last fully successful backup finished
-        if summary.abortReason == nil && !summary.cancelled && summary.failedAssets == 0 {
-            writeMarker(root: root, copiedAssets: summary.copiedAssets)
+        // Remember how and when this run ended (also when it was cancelled or had errors)
+        let status: LastRunStatus
+        if summary.abortReason != nil {
+            status = .aborted
+        } else if summary.cancelled {
+            status = .cancelled
+        } else if summary.failedAssets > 0 {
+            status = .completedWithErrors
+        } else {
+            status = .completed
         }
+        summary.markerWarning = saveMarker(root: root, status: status, summary: summary)
 
         emit(.iCloud(nil))
         emit(.finished(summary))
@@ -437,33 +487,64 @@ enum BackupEngine {
                 ?? values.volumeAvailableCapacityForImportantUsage
         }
 
-        // Last backup: marker file on the drive (survives reinstalling the app) or the copy kept by the app.
-        var dates: [Date] = []
-        if let data = try? Data(contentsOf: root.appendingPathComponent(markerName)) {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            if let marker = try? decoder.decode(BackupMarker.self, from: data) { dates.append(marker.lastBackup) }
+        // Last run: marker file on the drive (survives reinstalling the app) merged with the copy kept by the app.
+        if info.totalBytes != nil, let marker = loadMarker(root: root) {
+            info.lastRun = marker.run
+            info.lastRunStatus = marker.statusValue
+            info.lastRunFailed = marker.failedAssets ?? 0
+            info.lastCompleted = marker.completed
         }
-        if let saved = UserDefaults.standard.object(forKey: defaultsKey(for: root)) as? Date { dates.append(saved) }
-        info.lastBackup = dates.max()
         return info
     }
 
-    nonisolated private static func writeMarker(root: URL, copiedAssets: Int) {
+    /// Reads the marker from the drive and from the app's own copy and merges them (newest run wins).
+    nonisolated private static func loadMarker(root: URL) -> BackupMarker? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var found: [BackupMarker] = []
+
+        if let data = try? Data(contentsOf: root.appendingPathComponent(markerName)),
+           let marker = try? decoder.decode(BackupMarker.self, from: data) {
+            found.append(marker)
+        }
+        if let data = UserDefaults.standard.data(forKey: defaultsKey(for: root)),
+           let marker = try? decoder.decode(BackupMarker.self, from: data) {
+            found.append(marker)
+        }
+
+        guard var newest = found.max(by: { ($0.run ?? .distantPast) < ($1.run ?? .distantPast) }) else { return nil }
+        newest.lastCompleted = found.compactMap { $0.completed }.max()
+        return newest
+    }
+
+    /// Saves the run result in the app and on the drive. Returns a warning text if writing to the drive failed.
+    nonisolated private static func saveMarker(root: URL, status: LastRunStatus, summary: BackupSummary) -> String? {
+        let previous = loadMarker(root: root)
         let now = Date()
-        UserDefaults.standard.set(now, forKey: defaultsKey(for: root))
+        let marker = BackupMarker(lastRun: now,
+                                  status: status.rawValue,
+                                  lastCompleted: status == .completed ? now : previous?.completed,
+                                  copiedAssets: summary.copiedAssets,
+                                  failedAssets: summary.failedAssets)
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        if let data = try? encoder.encode(BackupMarker(lastBackup: now, copiedAssets: copiedAssets)) {
-            try? data.write(to: root.appendingPathComponent(markerName), options: .atomic)
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(marker) else { return "Nie udało się zakodować daty kopii." }
+
+        UserDefaults.standard.set(data, forKey: defaultsKey(for: root))
+        do {
+            // Plain (non-atomic) write: atomic writes can fail on exFAT/FAT drives.
+            try data.write(to: root.appendingPathComponent(markerName))
+            return nil
+        } catch {
+            return "Nie udało się zapisać daty kopii na dysku (\(error.localizedDescription)). Zapisano ją tylko w aplikacji."
         }
     }
 
     nonisolated private static func defaultsKey(for root: URL) -> String {
-        let values = try? root.resourceValues(forKeys: [.volumeUUIDStringKey, .volumeNameKey])
-        let id = values?.volumeUUIDString ?? values?.volumeName ?? "unknown"
-        return "lastBackup.\(id)/\(root.lastPathComponent)"
+        let volume = (try? root.resourceValues(forKeys: [.volumeNameKey]))?.volumeName ?? "?"
+        return "lastRunMarker.\(volume)/\(root.lastPathComponent)"
     }
 
     // MARK: Planning
