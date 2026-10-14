@@ -1,7 +1,30 @@
 import SwiftUI
 import Photos
 
-// MARK: - Events & summary (produced by the engine, consumed by the manager)
+// MARK: - Models
+
+/// Result of the analysis: what is still missing on the drive.
+struct PlanInfo: Sendable, Equatable {
+    var totalAssets = 0
+    var pendingAssets = 0
+    var pendingFiles = 0
+    var pendingBytes: Int64 = 0
+    var unknownSizeFiles = 0     // files whose size iOS did not report (estimate is then a lower bound)
+    var alreadyBackedUp = 0
+}
+
+/// What we know about the selected drive.
+struct DriveInfo: Sendable, Equatable {
+    var volumeName: String?
+    var totalBytes: Int64?
+    var availableBytes: Int64?
+    var lastBackup: Date?
+}
+
+private struct BackupMarker: Codable {
+    var lastBackup: Date
+    var copiedAssets: Int
+}
 
 struct BackupSummary: Sendable {
     var copiedAssets = 0
@@ -16,8 +39,10 @@ struct BackupSummary: Sendable {
 
 enum BackupEvent: Sendable {
     case scanning(checked: Int, total: Int)
+    case planned(PlanInfo)
     case copying(index: Int, total: Int, name: String)
     case assetFraction(Double)      // 0...1 – files finished within the current asset
+    case bytesCopied(Int64)         // bytes copied so far in this run
     case iCloud(Double?)            // iCloud download progress for the current file, nil = none
     case finished(BackupSummary)
 }
@@ -42,11 +67,20 @@ final class BackupManager: ObservableObject {
     @Published private(set) var summary: BackupSummary?
     @Published private(set) var isCancelling = false
     @Published private(set) var destinationURL: URL?
-    @Published private(set) var destinationLabel: String?
+    @Published private(set) var plan: PlanInfo?
+    @Published private(set) var drive: DriveInfo?
+    @Published private(set) var etaSeconds: TimeInterval?
+    @Published private(set) var speedBytesPerSecond: Double?
+    @Published private(set) var analyzeOnly = false
 
     private static let bookmarkKey = "backupDestinationBookmark"
     private var worker: Task<Void, Never>?
     private var runTask: Task<Void, Never>?
+    private var refreshTask: Task<Void, Never>?
+    private var copyStart: Date?
+    private var copiedBytes: Int64 = 0
+
+    var folderName: String? { destinationURL?.lastPathComponent }
 
     var isRunning: Bool {
         switch phase {
@@ -54,6 +88,8 @@ final class BackupManager: ObservableObject {
         default: return false
         }
     }
+    var isAnalyzing: Bool { isRunning && analyzeOnly }
+    var isCopying: Bool { isRunning && !analyzeOnly }
 
     init() {
         restoreDestination()
@@ -63,9 +99,13 @@ final class BackupManager: ObservableObject {
 
     /// Called with the folder URL returned by `.fileImporter`.
     func setDestination(_ url: URL) {
-        store(url)
         phase = .idle
         summary = nil
+        plan = nil
+        drive = nil
+        store(url)
+        refreshDriveInfo()
+        autoAnalyzeIfPossible()
     }
 
     func reportError(_ error: Error) {
@@ -80,11 +120,9 @@ final class BackupManager: ObservableObject {
             let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
             UserDefaults.standard.set(data, forKey: Self.bookmarkKey)
         } catch {
-            phase = .failed("Could not remember the folder: \(error.localizedDescription)")
+            phase = .failed("Nie udało się zapamiętać folderu: \(error.localizedDescription)")
         }
         destinationURL = url
-        let volume = (try? url.resourceValues(forKeys: [.volumeNameKey]))?.volumeName
-        destinationLabel = [url.lastPathComponent, volume].compactMap { $0 }.joined(separator: " · ")
     }
 
     private func restoreDestination() {
@@ -94,19 +132,32 @@ final class BackupManager: ObservableObject {
         store(url)
     }
 
-    // MARK: Start / cancel
+    // MARK: Drive info (free space, last backup)
 
-    func start() {
-        guard !isRunning, let root = destinationURL else { return }
-        summary = nil
-        overallProgress = 0
-        iCloudProgress = nil
-        isCancelling = false
-        phase = .scanning(checked: 0, total: 0)
-        UIApplication.shared.isIdleTimerDisabled = true   // keep the screen awake while copying
-        runTask = Task { [weak self] in
-            await self?.runBackup(root: root)
+    func refreshDriveInfo() {
+        guard let url = destinationURL else { drive = nil; return }
+        refreshTask?.cancel()
+        refreshTask = Task {
+            let info = await Task.detached(priority: .utility) {
+                BackupEngine.readDriveInfo(root: url)
+            }.value
+            if !Task.isCancelled { self.drive = info }
         }
+    }
+
+    // MARK: Start / analyze / cancel
+
+    /// Full backup (scans, then copies what is missing).
+    func start() { launch(dryRun: false) }
+
+    /// Only scans and works out how much is still to copy – nothing is written.
+    func analyze() { launch(dryRun: true) }
+
+    /// Runs the analysis in the background, but only if Photos access was already granted (never shows a prompt by itself).
+    func autoAnalyzeIfPossible() {
+        guard !isRunning, destinationURL != nil,
+              PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else { return }
+        launch(dryRun: true)
     }
 
     func cancel() {
@@ -115,7 +166,25 @@ final class BackupManager: ObservableObject {
         worker?.cancel()
     }
 
-    private func runBackup(root: URL) async {
+    private func launch(dryRun: Bool) {
+        guard !isRunning, let root = destinationURL else { return }
+        if !dryRun { summary = nil }
+        overallProgress = 0
+        iCloudProgress = nil
+        etaSeconds = nil
+        speedBytesPerSecond = nil
+        copiedBytes = 0
+        copyStart = nil
+        isCancelling = false
+        analyzeOnly = dryRun
+        phase = .scanning(checked: 0, total: 0)
+        if !dryRun { UIApplication.shared.isIdleTimerDisabled = true }   // keep the screen awake while copying
+        runTask = Task { [weak self] in
+            await self?.runBackup(root: root, dryRun: dryRun)
+        }
+    }
+
+    private func runBackup(root: URL, dryRun: Bool) async {
         defer { UIApplication.shared.isIdleTimerDisabled = false }
 
         // 1. Photo Library permission (full access is required for a complete backup)
@@ -124,7 +193,7 @@ final class BackupManager: ObservableObject {
             status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         }
         guard status == .authorized else {
-            phase = .failed("Full Photos access is required. Open Settings › Privacy › Photos and allow Full Access for this app.")
+            phase = .failed("Potrzebny jest pełny dostęp do Zdjęć. Otwórz Ustawienia › Prywatność i ochrona › Zdjęcia i zezwól tej aplikacji na pełny dostęp.")
             return
         }
 
@@ -133,22 +202,23 @@ final class BackupManager: ObservableObject {
         defer { if scoped { root.stopAccessingSecurityScopedResource() } }
 
         guard (try? root.checkResourceIsReachable()) == true else {
-            phase = .failed("Can't reach the selected folder. Reconnect the drive and select the folder again.")
+            phase = .failed("Nie można uzyskać dostępu do wybranego folderu. Podłącz dysk i wybierz folder ponownie.")
             return
         }
 
         // 3. Run the engine off the main thread and listen to its events
         let (stream, continuation) = AsyncStream.makeStream(of: BackupEvent.self)
         worker = Task.detached(priority: .userInitiated) {
-            await BackupEngine.run(root: root, emit: { continuation.yield($0) })
+            await BackupEngine.run(root: root, dryRun: dryRun, emit: { continuation.yield($0) })
             continuation.finish()
         }
 
         for await event in stream {
             handle(event)
         }
-        if isRunning { phase = .finished }   // safety net
+        if isRunning { phase = dryRun ? .idle : .finished }   // safety net
         isCancelling = false
+        refreshDriveInfo()
     }
 
     private func handle(_ event: BackupEvent) {
@@ -156,30 +226,67 @@ final class BackupManager: ObservableObject {
         case .scanning(let checked, let total):
             phase = .scanning(checked: checked, total: total)
 
+        case .planned(let info):
+            plan = info
+
         case .copying(let index, let total, let name):
+            if copyStart == nil { copyStart = Date() }
             phase = .copying(index: index, total: total, fileName: name)
             overallProgress = Double(index - 1) / Double(max(total, 1))
             iCloudProgress = nil
+            updateETA()
 
         case .assetFraction(let fraction):
             if case .copying(let index, let total, _) = phase {
                 overallProgress = (Double(index - 1) + fraction) / Double(max(total, 1))
             }
 
+        case .bytesCopied(let bytes):
+            copiedBytes = bytes
+            updateETA()
+
         case .iCloud(let fraction):
             if let fraction, fraction < 1 { iCloudProgress = fraction } else { iCloudProgress = nil }
 
         case .finished(let result):
+            if analyzeOnly {                 // analysis only: no result screen
+                phase = .idle
+                return
+            }
             summary = result
             iCloudProgress = nil
+            etaSeconds = nil
             if let reason = result.abortReason {
                 phase = .failed(reason)
+                plan = nil
             } else if result.cancelled {
                 phase = .cancelled
+                plan = nil
             } else {
                 overallProgress = 1
                 phase = .finished
+                if result.failedAssets == 0, let p = plan {
+                    plan = PlanInfo(totalAssets: p.totalAssets, alreadyBackedUp: p.totalAssets)
+                } else {
+                    plan = nil
+                }
             }
+        }
+    }
+
+    private func updateETA() {
+        guard let start = copyStart, case .copying(let index, let total, _) = phase else { return }
+        let elapsed = Date().timeIntervalSince(start)
+        guard elapsed > 5 else { return }
+
+        if copiedBytes > 0 {
+            speedBytesPerSecond = Double(copiedBytes) / elapsed
+        }
+        if let plan, plan.pendingBytes > 0, copiedBytes > 0 {
+            let remaining = max(plan.pendingBytes - copiedBytes, 0)
+            etaSeconds = Double(remaining) / (Double(copiedBytes) / elapsed)
+        } else if index > 1 {
+            etaSeconds = elapsed / Double(index - 1) * Double(total - index + 1)
         }
     }
 }
@@ -189,6 +296,7 @@ final class BackupManager: ObservableObject {
 private struct PendingFile: @unchecked Sendable {
     let resource: PHAssetResource
     let destination: URL
+    let size: Int64              // 0 = unknown
 }
 
 private struct PendingAsset: @unchecked Sendable {
@@ -203,8 +311,12 @@ enum BackupEngine {
     nonisolated static let includeEditedVersions = true
     /// FAT/exFAT drives store timestamps with ~2 s resolution.
     nonisolated private static let dateTolerance: TimeInterval = 3
+    nonisolated private static let markerName = ".usb-backup-info.json"
 
-    nonisolated static func run(root: URL, emit: @escaping @Sendable (BackupEvent) -> Void) async {
+    // MARK: Main entry
+
+    /// `dryRun == true`: only scan and report what is missing (`.planned`), copy nothing.
+    nonisolated static func run(root: URL, dryRun: Bool, emit: @escaping @Sendable (BackupEvent) -> Void) async {
         var summary = BackupSummary()
         let fm = FileManager.default
 
@@ -222,6 +334,8 @@ enum BackupEngine {
         // ---- 2. Plan: work out which files are not on the drive yet
         var pending: [PendingAsset] = []
         var reserved = Set<String>()
+        var info = PlanInfo()
+        info.totalAssets = total
         var checked = 0
         emit(.scanning(checked: 0, total: total))
 
@@ -233,6 +347,11 @@ enum BackupEngine {
                 if plan.existing > 0 { summary.alreadyBackedUp += 1 }
             } else {
                 pending.append(PendingAsset(displayName: plan.name, date: asset.creationDate, files: plan.missing))
+                info.pendingAssets += 1
+                info.pendingFiles += plan.missing.count
+                for file in plan.missing {
+                    if file.size > 0 { info.pendingBytes += file.size } else { info.unknownSizeFiles += 1 }
+                }
             }
             checked += 1
             if checked % 100 == 0 { emit(.scanning(checked: checked, total: total)) }
@@ -245,13 +364,21 @@ enum BackupEngine {
             return
         }
 
+        info.alreadyBackedUp = summary.alreadyBackedUp
+        emit(.planned(info))
+
+        if dryRun {
+            emit(.finished(summary))
+            return
+        }
+
         // ---- 3. Copy
         var consecutiveFailures = 0
         for (i, item) in pending.enumerated() {
             if Task.isCancelled { summary.cancelled = true; break }
 
             guard (try? root.checkResourceIsReachable()) == true else {
-                summary.abortReason = "The drive was disconnected. \(summary.copiedAssets) item(s) were copied before it stopped. Reconnect it and run the backup again – it will continue where it left off."
+                summary.abortReason = "Dysk został odłączony. Skopiowano \(summary.copiedAssets) elementów, zanim kopia się zatrzymała. Podłącz go ponownie i uruchom kopię jeszcze raz – wznowi od miejsca przerwania."
                 break
             }
 
@@ -265,6 +392,7 @@ enum BackupEngine {
                     let bytes = try await copy(file, date: item.date, fm: fm) { emit(.iCloud($0)) }
                     summary.copiedFiles += 1
                     summary.bytesCopied += bytes
+                    emit(.bytesCopied(summary.bytesCopied))
                     emit(.assetFraction(Double(j + 1) / Double(item.files.count)))
                 }
                 summary.copiedAssets += 1
@@ -276,14 +404,66 @@ enum BackupEngine {
                     summary.errors.append("\(item.displayName): \(error.localizedDescription)")
                 }
                 if consecutiveFailures >= 10 {
-                    summary.abortReason = "Stopped after 10 failures in a row. Last error: \(error.localizedDescription)"
+                    summary.abortReason = "Przerwano po 10 błędach z rzędu. Ostatni błąd: \(error.localizedDescription)"
                     break
                 }
             }
         }
 
+        // Remember when the last fully successful backup finished
+        if summary.abortReason == nil && !summary.cancelled && summary.failedAssets == 0 {
+            writeMarker(root: root, copiedAssets: summary.copiedAssets)
+        }
+
         emit(.iCloud(nil))
         emit(.finished(summary))
+    }
+
+    // MARK: Drive info & last backup
+
+    nonisolated static func readDriveInfo(root: URL) -> DriveInfo {
+        let scoped = root.startAccessingSecurityScopedResource()
+        defer { if scoped { root.stopAccessingSecurityScopedResource() } }
+
+        var info = DriveInfo()
+        let keys: Set<URLResourceKey> = [.volumeNameKey,
+                                         .volumeTotalCapacityKey,
+                                         .volumeAvailableCapacityKey,
+                                         .volumeAvailableCapacityForImportantUsageKey]
+        if let values = try? root.resourceValues(forKeys: keys) {
+            info.volumeName = values.volumeName
+            info.totalBytes = values.volumeTotalCapacity.map { Int64($0) }
+            info.availableBytes = values.volumeAvailableCapacity.map { Int64($0) }
+                ?? values.volumeAvailableCapacityForImportantUsage
+        }
+
+        // Last backup: marker file on the drive (survives reinstalling the app) or the copy kept by the app.
+        var dates: [Date] = []
+        if let data = try? Data(contentsOf: root.appendingPathComponent(markerName)) {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            if let marker = try? decoder.decode(BackupMarker.self, from: data) { dates.append(marker.lastBackup) }
+        }
+        if let saved = UserDefaults.standard.object(forKey: defaultsKey(for: root)) as? Date { dates.append(saved) }
+        info.lastBackup = dates.max()
+        return info
+    }
+
+    nonisolated private static func writeMarker(root: URL, copiedAssets: Int) {
+        let now = Date()
+        UserDefaults.standard.set(now, forKey: defaultsKey(for: root))
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(BackupMarker(lastBackup: now, copiedAssets: copiedAssets)) {
+            try? data.write(to: root.appendingPathComponent(markerName), options: .atomic)
+        }
+    }
+
+    nonisolated private static func defaultsKey(for root: URL) -> String {
+        let values = try? root.resourceValues(forKeys: [.volumeUUIDStringKey, .volumeNameKey])
+        let id = values?.volumeUUIDString ?? values?.volumeName ?? "unknown"
+        return "lastBackup.\(id)/\(root.lastPathComponent)"
     }
 
     // MARK: Planning
@@ -308,10 +488,17 @@ enum BackupEngine {
             if resolved.exists {
                 existing += 1
             } else {
-                missing.append(PendingFile(resource: resource, destination: resolved.url))
+                missing.append(PendingFile(resource: resource, destination: resolved.url, size: fileSize(of: resource)))
             }
         }
         return (missing, existing, primary.originalFilename)
+    }
+
+    /// iOS has no public API for a resource's size. `fileSize` is an undocumented but long-stable property;
+    /// it is guarded so nothing breaks if it ever disappears (the estimate then shows "~" / unknown).
+    nonisolated private static func fileSize(of resource: PHAssetResource) -> Int64 {
+        guard resource.responds(to: NSSelectorFromString("fileSize")) else { return 0 }
+        return (resource.value(forKey: "fileSize") as? NSNumber)?.int64Value ?? 0
     }
 
     /// Which resources we save and what they are called. Live Photos get the same base name for HEIC/JPG + MOV.
