@@ -1202,7 +1202,6 @@ enum BackupEngine {
 nonisolated func isCameraAsset(_ asset: PHAsset) -> Bool {
     if asset.sourceType != .typeUserLibrary { return false }
     if asset.mediaSubtypes.contains(.photoScreenshot) { return false }
-    if #available(iOS 15.0, *), asset.mediaSubtypes.contains(.videoScreenRecording) { return false }
     guard let name = PHAssetResource.assetResources(for: asset).first?.originalFilename else { return false }
     return name.range(of: #"^(IMG|MVI|PANO)_[0-9]+\.[A-Za-z0-9]+$"#, options: [.regularExpression, .caseInsensitive]) != nil
 }
