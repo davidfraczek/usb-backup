@@ -5,11 +5,13 @@ struct SettingsView: View {
     @AppStorage(Lang.storageKey) private var languageRaw = AppLanguage.system.rawValue
     @Environment(\.dismiss) private var dismiss
     @State private var notificationsDenied = false
+    @AppStorage(ThemeStore.storageKey) private var themeRaw = AppTheme.classic.rawValue
 
     var body: some View {
         NavigationStack {
             Form {
                 languageSection
+                themeSection
                 contentSection
                 layoutSection
                 safetySection
@@ -105,14 +107,61 @@ struct SettingsView: View {
             }
             .padding(.vertical, 2)
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text(tr("Skąd kopiować", "Where from"))
+                Picker(selection: $manager.options.source) {
+                    ForEach(MediaSource.allCases) { source in
+                        Text(source.title).tag(source)
+                    }
+                } label: {
+                    EmptyView()
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            .padding(.vertical, 2)
+
             Toggle(isOn: $manager.options.includeEdited) {
                 Label(tr("Zapisuj edytowane wersje", "Save edited versions"), systemImage: "slider.horizontal.3")
             }
         } header: {
             Text(tr("Zawartość kopii", "Backup content"))
         } footer: {
+            VStack(alignment: .leading, spacing: 6) {
             Text(tr("Edytowana wersja zapisuje się obok oryginału z końcówką _edited. Live Photo zawsze zapisuje się razem z filmem. Zmiana dotyczy kolejnych kopii, to, co już jest na dysku, zostaje.",
                     "An edited version is saved next to the original with an _edited suffix. Live Photos are always saved together with their video. Changes apply to future backups; what is already on the drive stays."))
+            if manager.options.source == .camera {
+                Text(tr("„Tylko z aparatu” to przybliżenie, bo iOS nie oznacza, co zrobiono aparatem. Pomijane są zrzuty ekranu, nagrania ekranu, elementy zsynchronizowane z komputerem i pliki bez nazwy typu IMG_1234. Zdjęcia odebrane przez AirDrop mogą się załapać.",
+                        "“Camera only” is an approximation because iOS does not flag what was shot with the camera. Screenshots, screen recordings, items synced from a computer and files without a camera-style name (IMG_1234) are skipped. Photos received via AirDrop may still be included."))
+            }
+            }
+        }
+    }
+
+    // MARK: Theme
+
+    private var themeSection: some View {
+        Section {
+            ForEach(AppTheme.allCases) { theme in
+                Button {
+                    themeRaw = theme.rawValue
+                } label: {
+                    HStack(spacing: 12) {
+                        Circle()
+                            .fill(LinearGradient(colors: theme.gradient, startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .frame(width: 28, height: 28)
+                        Text(theme.title)
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        if themeRaw == theme.rawValue {
+                            Image(systemName: "checkmark")
+                                .fontWeight(.semibold)
+                        }
+                    }
+                }
+            }
+        } header: {
+            Text(tr("Motyw kolorystyczny", "Colour theme"))
         }
     }
 

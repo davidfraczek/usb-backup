@@ -42,6 +42,7 @@ func durationText(_ seconds: TimeInterval) -> String {
 // MARK: - Main screen
 
 struct ContentView: View {
+    @Environment(\.appTheme) private var theme
     @StateObject private var manager = BackupManager()
     @State private var showingPicker = false
     @State private var showingSettings = false
@@ -156,7 +157,7 @@ struct ContentView: View {
     private var background: some View {
         ZStack(alignment: .top) {
             Color(.systemGroupedBackground)
-            LinearGradient(colors: [Color.indigo.opacity(0.35), Color.blue.opacity(0.12), .clear],
+            LinearGradient(colors: [theme.accent.opacity(0.35), theme.gradient[0].opacity(0.12), .clear],
                            startPoint: .top, endPoint: .center)
                 .frame(height: 460)
         }
@@ -166,7 +167,7 @@ struct ContentView: View {
     private var header: some View {
         HStack(spacing: 14) {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(LinearGradient(colors: [.blue, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing))
+                .fill(LinearGradient(colors: theme.gradient, startPoint: .topLeading, endPoint: .bottomTrailing))
                 .frame(width: 52, height: 52)
                 .overlay(
                     Image(systemName: "externaldrive.fill")
@@ -213,9 +214,9 @@ struct ContentView: View {
                 HStack(spacing: 14) {
                     Image(systemName: manager.destinationURL == nil ? "externaldrive.badge.plus" : "externaldrive.fill")
                         .font(.title2)
-                        .foregroundStyle(.indigo)
+                        .foregroundStyle(theme.accent)
                         .frame(width: 46, height: 46)
-                        .background(Color.indigo.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                        .background(theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(manager.folderName ?? tr("Nie wybrano folderu", "No folder selected"))
@@ -502,7 +503,7 @@ struct ContentView: View {
                 }
                 if total > 0 {
                     ProgressView(value: Double(checked), total: Double(max(total, 1)))
-                        .tint(.indigo)
+                        .tint(theme.accent)
                     Text(tr("Sprawdzono \(checked) z \(total)", "Checked \(checked) of \(total)"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -525,7 +526,7 @@ struct ContentView: View {
                 }
 
                 ProgressView(value: manager.overallProgress)
-                    .tint(.indigo)
+                    .tint(theme.accent)
 
                 Text(name)
                     .font(.caption)
@@ -549,10 +550,10 @@ struct ContentView: View {
                     Label(tr("Pobieranie z iCloud… \(Int(f * 100))%", "Downloading from iCloud… \(Int(f * 100))%"),
                           systemImage: "icloud.and.arrow.down")
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(theme.accent)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
-                        .background(Color.blue.opacity(0.12), in: Capsule())
+                        .background(theme.accent.opacity(0.12), in: Capsule())
                 }
             }
         }
@@ -700,7 +701,7 @@ struct ContentView: View {
                         Text(tr("Analizuję…", "Analyzing…"))
                     }
                 }
-                .buttonStyle(PrimaryButtonStyle())
+                .buttonStyle(PrimaryButtonStyle(colors: theme.gradient))
                 .disabled(true)
 
                 Button(tr("Anuluj analizę", "Cancel analysis")) { manager.cancel() }
@@ -713,7 +714,7 @@ struct ContentView: View {
                                          : tr("Rozpocznij kopię", "Start backup"),
                           systemImage: notEnoughSpace ? "exclamationmark.triangle.fill" : "arrow.up.circle.fill")
                 }
-                .buttonStyle(PrimaryButtonStyle(colors: notEnoughSpace ? [.orange, .red] : [.blue, .indigo]))
+                .buttonStyle(PrimaryButtonStyle(colors: notEnoughSpace ? [.orange, .red] : theme.gradient))
                 .disabled(manager.destinationURL == nil)
 
                 Button {
@@ -800,6 +801,7 @@ private struct LegendDot: View {
 
 /// Other files | existing backup folder | new backup (planned) | free space, drawn as one capsule.
 private struct CapacityBar: View {
+    @Environment(\.appTheme) private var theme
     let total: Int64
     let available: Int64
     let folder: Int64
@@ -820,12 +822,12 @@ private struct CapacityBar: View {
                     .fill(Color.gray.opacity(0.55))
                     .frame(width: width * other / totalValue)
                 Rectangle()
-                    .fill(Color.indigo)
+                    .fill(theme.accent)
                     .frame(width: width * folderValue / totalValue)
                 Rectangle()
                     .fill(overflow
                           ? AnyShapeStyle(Color.red)
-                          : AnyShapeStyle(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing)))
+                          : AnyShapeStyle(LinearGradient(colors: theme.barNew, startPoint: .leading, endPoint: .trailing)))
                     .frame(width: width * plannedClamped / totalValue)
                 Spacer(minLength: 0)
             }
@@ -838,6 +840,7 @@ private struct CapacityBar: View {
 }
 
 private struct ProgressRing: View {
+    @Environment(\.appTheme) private var theme
     let progress: Double
 
     var body: some View {
@@ -847,7 +850,7 @@ private struct ProgressRing: View {
             Circle()
                 .trim(from: 0, to: max(progress, 0.005))
                 .stroke(
-                    AngularGradient(colors: [.blue, .indigo, .purple, .blue], center: .center),
+                    AngularGradient(colors: theme.ring, center: .center),
                     style: StrokeStyle(lineWidth: 14, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))

@@ -62,6 +62,20 @@ enum MediaFilter: String, CaseIterable, Identifiable, Codable, Sendable {
     }
 }
 
+/// Which part of the library is copied.
+enum MediaSource: String, CaseIterable, Identifiable, Codable, Sendable {
+    case all, camera
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return tr("Cała biblioteka", "Whole library")
+        case .camera: return tr("Tylko z aparatu", "Camera only")
+        }
+    }
+}
+
 enum FolderLayout: String, CaseIterable, Identifiable, Codable, Sendable {
     case yearMonth, yearSlashMonth, yearMonthDay
 
@@ -104,6 +118,7 @@ enum FolderLayout: String, CaseIterable, Identifiable, Codable, Sendable {
 struct BackupOptions: Codable, Equatable, Sendable {
     var includeEdited = true
     var media: MediaFilter = .all
+    var source: MediaSource = .all      // whole library, or only what was shot with the camera
     var layout: FolderLayout = .yearMonth
     var allowCellular = false           // download iCloud originals over cellular / personal hotspot
     var notifyOnFinish = true           // local notification when a backup ends, fails or is paused by iOS
@@ -117,6 +132,7 @@ struct BackupOptions: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         includeEdited = try c.decodeIfPresent(Bool.self, forKey: .includeEdited) ?? true
         media = try c.decodeIfPresent(MediaFilter.self, forKey: .media) ?? .all
+        source = try c.decodeIfPresent(MediaSource.self, forKey: .source) ?? .all
         layout = try c.decodeIfPresent(FolderLayout.self, forKey: .layout) ?? .yearMonth
         allowCellular = try c.decodeIfPresent(Bool.self, forKey: .allowCellular) ?? false
         notifyOnFinish = try c.decodeIfPresent(Bool.self, forKey: .notifyOnFinish) ?? true
@@ -125,7 +141,7 @@ struct BackupOptions: Codable, Equatable, Sendable {
 
     /// Only these three change *what* is copied (and where), so only they make the old estimate invalid.
     func sameContent(as other: BackupOptions) -> Bool {
-        includeEdited == other.includeEdited && media == other.media && layout == other.layout
+        includeEdited == other.includeEdited && media == other.media && source == other.source && layout == other.layout
     }
 
     private static let storageKey = "backupOptions"

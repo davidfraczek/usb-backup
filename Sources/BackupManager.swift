@@ -669,6 +669,7 @@ enum BackupEngine {
 
         fetch.enumerateObjects { asset, _, stop in
             if Task.isCancelled { stop.pointee = true; return }
+            if settings.source == .camera && !isCameraAsset(asset) { checked += 1; return }
 
             let plan = planFiles(for: asset, root: root, fm: fm, settings: settings, cache: folderCache, reserved: &reserved)
             if plan.missing.isEmpty {
@@ -1189,4 +1190,19 @@ enum BackupEngine {
         if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error { return isOutOfSpace(underlying) }
         return false
     }
+}
+
+// MARK: - "Camera only" filter
+
+/// Best-effort check whether an item was shot with the device camera.
+/// iOS has no "taken with camera" flag, so this combines what is known: the item lives in the user's own library
+/// (not synced from a computer or shared), it is not a screenshot or screen recording, and its original file name
+/// has the camera pattern (IMG_1234, MVI_1234, PANO_1234). Photos received via AirDrop keep such names and
+/// cannot be told apart.
+nonisolated func isCameraAsset(_ asset: PHAsset) -> Bool {
+    if asset.sourceType != .typeUserLibrary { return false }
+    if asset.mediaSubtypes.contains(.photoScreenshot) { return false }
+    if #available(iOS 15.0, *), asset.mediaSubtypes.contains(.videoScreenRecording) { return false }
+    guard let name = PHAssetResource.assetResources(for: asset).first?.originalFilename else { return false }
+    return name.range(of: #"^(IMG|MVI|PANO)_[0-9]+\.[A-Za-z0-9]+$"#, options: [.regularExpression, .caseInsensitive]) != nil
 }
