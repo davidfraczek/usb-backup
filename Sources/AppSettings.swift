@@ -105,6 +105,28 @@ struct BackupOptions: Codable, Equatable, Sendable {
     var includeEdited = true
     var media: MediaFilter = .all
     var layout: FolderLayout = .yearMonth
+    var allowCellular = false           // download iCloud originals over cellular / personal hotspot
+    var notifyOnFinish = true           // local notification when a backup ends, fails or is paused by iOS
+    var warnOnLowPower = true           // ask before starting on a low battery / in Low Power Mode
+
+    init() {}
+
+    // Settings saved by older versions don't contain the newer keys – missing keys keep their defaults,
+    // so updating the app never resets what was already chosen.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        includeEdited = try c.decodeIfPresent(Bool.self, forKey: .includeEdited) ?? true
+        media = try c.decodeIfPresent(MediaFilter.self, forKey: .media) ?? .all
+        layout = try c.decodeIfPresent(FolderLayout.self, forKey: .layout) ?? .yearMonth
+        allowCellular = try c.decodeIfPresent(Bool.self, forKey: .allowCellular) ?? false
+        notifyOnFinish = try c.decodeIfPresent(Bool.self, forKey: .notifyOnFinish) ?? true
+        warnOnLowPower = try c.decodeIfPresent(Bool.self, forKey: .warnOnLowPower) ?? true
+    }
+
+    /// Only these three change *what* is copied (and where), so only they make the old estimate invalid.
+    func sameContent(as other: BackupOptions) -> Bool {
+        includeEdited == other.includeEdited && media == other.media && layout == other.layout
+    }
 
     private static let storageKey = "backupOptions"
 

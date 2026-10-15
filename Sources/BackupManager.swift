@@ -78,6 +78,7 @@ struct BackupSummary: Sendable {
     var verifyFailed = 0                // files that failed the check (they are deleted, so the next run copies them again)
     var failedAssetIDs: [String] = []   // PHAsset.localIdentifier of everything that failed – used by "Try again"
     var blockedForSpace = false         // the run was not started because the drive is too small
+    var skippedCellular = 0             // iCloud originals skipped because the phone was on cellular data
 }
 
 /// The backup would not fit on the drive – the user is asked whether to go ahead anyway.
@@ -127,6 +128,8 @@ final class BackupManager: ObservableObject {
     @Published private(set) var folderBytes: Int64?           // size of the chosen backup folder on the drive
     @Published private(set) var isMeasuringFolder = false
     @Published private(set) var spaceShortfall: SpaceShortfall?   // set when a backup would not fit; the UI asks what to do
+    @Published private(set) var powerWarning: PowerWarning?       // low battery / Low Power Mode: the UI asks before starting
+    @Published private(set) var logURL: URL?                      // plain-text report of the last run, ready to share
     @Published var options = BackupOptions.load() {
         didSet { optionsDidChange(oldValue) }
     }
@@ -141,6 +144,8 @@ final class BackupManager: ObservableObject {
     private var copyStart: Date?
     private var copiedBytes: Int64 = 0
     private var isRetryRun = false
+    private static let backgroundNoticeID = "usbbackup.background"
+    private static let finishedNoticeID = "usbbackup.finished"
 
     var folderName: String? { destinationURL?.lastPathComponent }
 
@@ -247,13 +252,44 @@ final class BackupManager: ObservableObject {
 
     /// Full backup (scans, then copies what is missing).
     /// If an earlier analysis already shows that it won't fit on the drive, nothing starts and the user is asked first.
-    func start() {
+    /// Before that, on a low battery / in Low Power Mode, the user is asked as well (if that warning is switched on).
+    func start(skipPowerCheck: Bool = false) {
         guard !isRunning else { return }
+        if !skipPowerCheck, options.warnOnLowPower, let warning = PowerWarning.current() {
+            powerWarning = warning
+            return
+        }
         if let plan, let free = drive?.availableBytes, plan.pendingBytes > free {
             spaceShortfall = SpaceShortfall(needed: plan.pendingBytes, free: free)
             return
         }
         launch(dryRun: false)
+    }
+
+    /// The user accepted the battery warning. A short pause lets the first alert close before a possible second one opens.
+    func startAfterPowerWarning() {
+        powerWarning = nil
+        Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            start(skipPowerCheck: true)
+        }
+    }
+
+    func dismissPowerWarning() { powerWarning = nil }
+
+    /// The app left the screen while copying: iOS suspends it after a short while, so tell the user.
+    func appDidEnterBackground() {
+        guard isCopying, options.notifyOnFinish else { return }
+        Task {
+            await Notifier.post(id: Self.backgroundNoticeID,
+                                title: tr("Kopia może zostać wstrzymana", "The backup may be paused"),
+                                body: tr("Aplikacja przeszła w tło, a iOS po chwili ją wstrzymuje. Wróć do aplikacji, aby kopia trwała dalej.",
+                                         "The app went to the background and iOS suspends it after a short while. Return to the app to keep the backup going."))
+        }
+    }
+
+    func appDidBecomeActive() {
+        Notifier.remove(id: Self.backgroundNoticeID)
     }
 
     /// The user confirmed: copy as much as fits (oldest items first), the run stops cleanly when the drive is full.
@@ -284,6 +320,7 @@ final class BackupManager: ObservableObject {
     private func optionsDidChange(_ old: BackupOptions) {
         guard options != old else { return }
         options.save()
+        guard !options.sameContent(as: old) else { return }    // notification / battery / cellular options don't change the estimate
         plan = nil
         needsReanalysis = true
         runPendingReanalysis()
@@ -319,7 +356,12 @@ final class BackupManager: ObservableObject {
             isMeasuringFolder = false
         }
         phase = .scanning(checked: 0, total: 0)
-        if !dryRun { UIApplication.shared.isIdleTimerDisabled = true }   // keep the screen awake while copying
+        if !dryRun {
+            UIApplication.shared.isIdleTimerDisabled = true   // keep the screen awake while copying
+            Notifier.remove(id: Self.finishedNoticeID)
+            logURL = nil
+            if options.notifyOnFinish { Task { await Notifier.requestAuthorizationIfNeeded() } }
+        }
         runTask = Task { [weak self] in
             await self?.runBackup(root: root, dryRun: dryRun, retryIDs: retryIDs, force: force)
         }
@@ -408,8 +450,10 @@ final class BackupManager: ObservableObject {
                 return
             }
             summary = result
+            let planAtStart = plan
             iCloudProgress = nil
             etaSeconds = nil
+            defer { finalizeRun(result, plan: planAtStart) }      // runs after the phase below has been set
             if result.copiedFiles > 0 { folderBytes = (folderBytes ?? 0) + result.bytesCopied }   // instant estimate; exact value is measured right after the run
             if let reason = result.abortReason {
                 phase = .failed(reason)
@@ -427,6 +471,48 @@ final class BackupManager: ObservableObject {
                 }
             }
         }
+    }
+
+    /// After every real run: write the shareable log and (if wanted) notify the user.
+    private func finalizeRun(_ result: BackupSummary, plan: PlanInfo?) {
+        let outcome: String
+        if result.abortReason != nil {
+            outcome = "stopped early"
+        } else if result.cancelled {
+            outcome = "cancelled by the user"
+        } else if result.failedAssets > 0 {
+            outcome = "finished with errors"
+        } else {
+            outcome = "finished without errors"
+        }
+        logURL = LogExport.write(summary: result, outcome: outcome, drive: drive, plan: plan,
+                                 options: options, folderName: folderName, folderBytes: folderBytes)
+        notifyFinished(result)
+    }
+
+    private func notifyFinished(_ r: BackupSummary) {
+        guard options.notifyOnFinish, !r.cancelled else { return }       // a run the user cancelled needs no notification
+        Notifier.remove(id: Self.backgroundNoticeID)
+
+        let copied = tr("Skopiowano \(r.copiedAssets) elementów (\(formatBytes(r.bytesCopied))).",
+                        "Copied \(r.copiedAssets) items (\(formatBytes(r.bytesCopied))).")
+        let title: String
+        let body: String
+        if let reason = r.abortReason {
+            title = tr("Kopia przerwana", "Backup stopped")
+            body = reason
+        } else if r.failedAssets > 0 {
+            title = tr("Kopia zakończona z błędami", "Backup finished with errors")
+            body = copied + " " + tr("Błędów: \(r.failedAssets). Otwórz aplikację i dotknij „Spróbuj ponownie”.",
+                                     "Errors: \(r.failedAssets). Open the app and tap “Try again”.")
+        } else if r.copiedAssets > 0 {
+            title = r.verifiedFiles > 0 ? tr("Skopiowano i zweryfikowano", "Copied and verified")
+                                        : tr("Kopia zakończona", "Backup complete")
+            body = copied
+        } else {
+            return                                                      // nothing was copied: no need to disturb the user
+        }
+        Task { await Notifier.post(id: Self.finishedNoticeID, title: title, body: body) }
     }
 
     private func updateETA() {
@@ -546,6 +632,8 @@ enum BackupEngine {
                                 emit: @escaping @Sendable (BackupEvent) -> Void) async {
         var summary = BackupSummary()
         let fm = FileManager.default
+        let network = NetworkWatcher()
+        defer { network.stop() }
 
         // ---- 1. Fetch every photo & video in the library
         let options = PHFetchOptions()
@@ -647,7 +735,8 @@ enum BackupEngine {
                 try fm.createDirectory(at: folder, withIntermediateDirectories: true)
 
                 for (j, file) in item.files.enumerated() {
-                    let bytes = try await copy(file, date: item.date, fm: fm) { emit(.iCloud($0)) }
+                    let bytes = try await copy(file, date: item.date, fm: fm,
+                                               network: network, allowCellular: settings.allowCellular) { emit(.iCloud($0)) }
                     verifyList.append(VerifyItem(assetID: item.id,
                                                  name: file.destination.lastPathComponent,
                                                  url: file.destination,
@@ -663,7 +752,14 @@ enum BackupEngine {
                 summary.failedAssets += 1
                 consecutiveFailures += 1
                 if summary.failedAssetIDs.count < 5000 { summary.failedAssetIDs.append(item.id) }
-                if summary.errors.count < 50 {
+                if error is CellularBlockedError {
+                    // Not a real failure: the original is in iCloud and the phone is on cellular data.
+                    // It doesn't count towards "10 failures in a row"; "Try again" picks it up later on Wi-Fi.
+                    summary.skippedCellular += 1
+                    consecutiveFailures -= 1
+                    continue
+                }
+                if summary.errors.count < 500 {
                     summary.errors.append("\(item.displayName): \(error.localizedDescription)")
                 }
                 if isOutOfSpace(error) {
@@ -679,6 +775,13 @@ enum BackupEngine {
             }
         }
 
+        if summary.skippedCellular > 0 {
+            summary.errors.insert(
+                tr("Pominięto \(summary.skippedCellular) elementów z iCloud, bo telefon był w sieci komórkowej. Połącz się z Wi-Fi i dotknij „Spróbuj ponownie” (lub włącz pobieranie przez sieć komórkową w ustawieniach).",
+                   "Skipped \(summary.skippedCellular) items stored in iCloud because the phone was on cellular data. Connect to Wi-Fi and tap “Try again” (or allow cellular downloads in Settings)."),
+                at: 0)
+        }
+
         // ---- 4. Verify: every copied file must still be on the drive with exactly the size of the original.
         // A file that fails is deleted, so the next run copies it again (otherwise it would count as "already backed up").
         if !verifyList.isEmpty, (try? root.checkResourceIsReachable()) == true {
@@ -692,7 +795,7 @@ enum BackupEngine {
                     summary.verifyFailed += 1
                     badAssets.insert(item.assetID)
                     try? fm.removeItem(at: item.url)
-                    if summary.errors.count < 50 {
+                    if summary.errors.count < 500 {
                         summary.errors.append("\(item.name): " + VerificationError(expected: item.expectedBytes, actual: max(actual, 0)).localizedDescription)
                     }
                 }
@@ -980,13 +1083,16 @@ enum BackupEngine {
     nonisolated private static func copy(_ file: PendingFile,
                                          date: Date?,
                                          fm: FileManager,
+                                         network: NetworkWatcher,
+                                         allowCellular: Bool,
                                          onDownload: @escaping @Sendable (Double) -> Void) async throws -> Int64 {
         let temp = file.destination.appendingPathExtension("partial")
         try? fm.removeItem(at: temp)
 
         do {
             // `expected` = number of bytes iOS delivered = the exact size of the original
-            let expected = try await writeResource(file.resource, to: temp, onDownload: onDownload)
+            let expected = try await fetchOriginal(file.resource, to: temp, network: network,
+                                                   allowCellular: allowCellular, onDownload: onDownload)
 
             // Check 1: what landed on the drive must have exactly that size
             let onDrive = (try? fm.attributesOfItem(atPath: temp.path))
@@ -1004,15 +1110,40 @@ enum BackupEngine {
         }
     }
 
-    /// Streams the original data of the resource to `url` (downloading it from iCloud if necessary),
+    /// First tries without the network: an original that is stored on the phone is copied right away.
+    /// Only if it lives in iCloud, the download starts – unless the phone is on cellular data and that is not allowed.
+    nonisolated private static func fetchOriginal(_ resource: PHAssetResource,
+                                                  to url: URL,
+                                                  network: NetworkWatcher,
+                                                  allowCellular: Bool,
+                                                  onDownload: @escaping @Sendable (Double) -> Void) async throws -> Int64 {
+        do {
+            return try await writeResource(resource, to: url, allowNetwork: false, onDownload: onDownload)
+        } catch let error where isNetworkAccessRequired(error) {
+            if network.isExpensive && !allowCellular { throw CellularBlockedError() }
+            return try await writeResource(resource, to: url, allowNetwork: true, onDownload: onDownload)
+        }
+    }
+
+    /// The attempt without network failed because the original is not on the phone.
+    /// iOS reports this as PHPhotosError.networkAccessRequired (3164); to be safe, any error from the Photos framework
+    /// counts (the second attempt, with network, then either succeeds or reports the real error).
+    /// Errors from writing to the drive (e.g. disk full) are in other domains and are not retried.
+    nonisolated private static func isNetworkAccessRequired(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == PHPhotosErrorDomain
+    }
+
+    /// Streams the original data of the resource to `url` (downloading it from iCloud if `allowNetwork`),
     /// flushes it to the drive and returns the number of bytes received.
     nonisolated private static func writeResource(_ resource: PHAssetResource,
                                                   to url: URL,
+                                                  allowNetwork: Bool,
                                                   onDownload: @escaping @Sendable (Double) -> Void) async throws -> Int64 {
         let sink = try StreamSink(url: url)
 
         let options = PHAssetResourceRequestOptions()
-        options.isNetworkAccessAllowed = true            // fetch full-resolution original from iCloud
+        options.isNetworkAccessAllowed = allowNetwork    // fetch full-resolution original from iCloud only when allowed
         options.progressHandler = { progress in onDownload(progress) }
 
         do {

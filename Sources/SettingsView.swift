@@ -4,6 +4,7 @@ struct SettingsView: View {
     @ObservedObject var manager: BackupManager
     @AppStorage(Lang.storageKey) private var languageRaw = AppLanguage.system.rawValue
     @Environment(\.dismiss) private var dismiss
+    @State private var notificationsDenied = false
 
     var body: some View {
         NavigationStack {
@@ -11,6 +12,16 @@ struct SettingsView: View {
                 languageSection
                 contentSection
                 layoutSection
+                safetySection
+            }
+            .task { notificationsDenied = await Notifier.isDenied() }
+            .onChange(of: manager.options.notifyOnFinish) { _, enabled in
+                if enabled {
+                    Task {
+                        await Notifier.requestAuthorizationIfNeeded()
+                        notificationsDenied = await Notifier.isDenied()
+                    }
+                }
             }
             .navigationTitle(tr("Ustawienia", "Settings"))
             .navigationBarTitleDisplayMode(.inline)
@@ -22,6 +33,40 @@ struct SettingsView: View {
             }
         }
         .environment(\.locale, Lang.localeForCode(languageRaw))
+    }
+
+    // MARK: Safety (battery, mobile data, notifications)
+
+    private var safetySection: some View {
+        Section {
+            Toggle(isOn: $manager.options.allowCellular) {
+                Label(tr("Pobieraj z iCloud przez sieć komórkową", "Download from iCloud over cellular"),
+                      systemImage: "antenna.radiowaves.left.and.right")
+            }
+            Toggle(isOn: $manager.options.warnOnLowPower) {
+                Label(tr("Ostrzegaj przy niskiej baterii", "Warn on low battery"), systemImage: "battery.25")
+            }
+            Toggle(isOn: $manager.options.notifyOnFinish) {
+                Label(tr("Powiadomienia o zakończeniu i błędach", "Notify when finished or on errors"),
+                      systemImage: "bell.badge")
+            }
+        } header: {
+            Text(tr("Zabezpieczenia i powiadomienia", "Safety and notifications"))
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(tr("Gdy pobieranie przez sieć komórkową jest wyłączone (zalecane), zdjęcia i filmy, które są tylko w iCloud, są pomijane, dopóki telefon nie połączy się z Wi-Fi. Potem dotknij „Spróbuj ponownie”. Dotyczy też Personal Hotspot.",
+                        "While downloading over cellular is off (recommended), photos and videos that exist only in iCloud are skipped until the phone is on Wi-Fi. Then tap “Try again”. This also applies to Personal Hotspot."))
+                Text(tr("Ostrzeżenie pojawia się, gdy bateria ma poniżej 20% i telefon się nie ładuje albo włączony jest tryb niskiego zużycia energii.",
+                        "The warning appears when the battery is below 20% and not charging, or Low Power Mode is on."))
+                Text(tr("Powiadomienie pojawi się też, gdy aplikacja przejdzie w tło podczas kopiowania (iOS wstrzymuje wtedy kopię).",
+                        "You'll also get a notification if the app goes to the background while copying (iOS then suspends the backup)."))
+                if notificationsDenied && manager.options.notifyOnFinish {
+                    Text(tr("Powiadomienia są wyłączone dla tej aplikacji w Ustawieniach iOS.",
+                            "Notifications are turned off for this app in iOS Settings."))
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
     }
 
     // MARK: Language

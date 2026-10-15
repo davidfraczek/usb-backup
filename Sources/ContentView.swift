@@ -47,6 +47,7 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var showingHistory = false
     @State private var showErrors = true
+    private let errorListLimit = 50
     @AppStorage(Lang.storageKey) private var languageRaw = AppLanguage.system.rawValue
     @Environment(\.scenePhase) private var scenePhase
 
@@ -70,6 +71,16 @@ struct ContentView: View {
                 .padding(.bottom, 24)
             }
             .scrollIndicators(.hidden)
+            // Attached to a different view than the "not enough space" alert, so the two never compete.
+            .alert(manager.powerWarning?.title ?? "",
+                   isPresented: Binding(get: { manager.powerWarning != nil },
+                                        set: { if !$0 { manager.dismissPowerWarning() } }),
+                   presenting: manager.powerWarning) { _ in
+                Button(tr("Kopiuj mimo to", "Copy anyway")) { manager.startAfterPowerWarning() }
+                Button(tr("Anuluj", "Cancel"), role: .cancel) { }
+            } message: { warning in
+                Text(warning.message)
+            }
         }
         .environment(\.locale, Lang.localeForCode(languageRaw))
         .fileImporter(
@@ -108,6 +119,13 @@ struct ContentView: View {
         .onAppear {
             manager.refreshDriveInfo()
             manager.autoAnalyzeIfPossible()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            switch newPhase {
+            case .background: manager.appDidEnterBackground()
+            case .active: manager.appDidBecomeActive()
+            default: break
+            }
         }
         .task(id: scenePhase) {
             // While the app is visible, re-check the drive every few seconds,
@@ -444,6 +462,9 @@ struct ContentView: View {
 
     private var finishedTitle: String {
         guard let s = manager.summary else { return tr("Kopia zakończona", "Backup complete") }
+        if s.skippedCellular > 0 && s.skippedCellular == s.failedAssets {
+            return tr("Kopia niekompletna: część plików czeka w iCloud", "Backup incomplete: some files are waiting in iCloud")
+        }
         if s.failedAssets > 0 { return tr("Kopia zakończona z błędami", "Backup finished with errors") }
         if s.copiedAssets == 0 { return tr("Wszystko już skopiowane", "Everything is already backed up") }
         return s.verifiedFiles > 0
@@ -561,14 +582,21 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
+                    if s.skippedCellular > 0 {
+                        summaryRow(tr("Pominięte (iCloud, sieć komórkowa)", "Skipped (iCloud, cellular)"),
+                                   "\(s.skippedCellular)", tint: .orange)
+                    }
                     if s.failedAssets > 0 {
-                        summaryRow(tr("Błędy", "Errors"), "\(s.failedAssets)", tint: .red)
+                        summaryRow(tr("Błędy", "Errors"), "\(s.failedAssets - s.skippedCellular)",
+                                   tint: s.failedAssets > s.skippedCellular ? .red : .secondary)
                         DisclosureGroup(isExpanded: $showErrors) {
                             VStack(alignment: .leading, spacing: 4) {
-                                ForEach(s.errors, id: \.self) { Text($0).font(.caption) }
-                                if s.failedAssets > s.errors.count {
-                                    Text(tr("…i kolejne (lista pokazuje pierwsze \(s.errors.count))",
-                                            "…and more (the list shows the first \(s.errors.count))"))
+                                ForEach(Array(s.errors.prefix(errorListLimit).enumerated()), id: \.offset) { _, message in
+                                    Text(message).font(.caption)
+                                }
+                                if s.errors.count > errorListLimit {
+                                    Text(tr("…i kolejne (lista pokazuje pierwsze \(errorListLimit), pełna jest w logu)",
+                                            "…and more (the list shows the first \(errorListLimit); the full list is in the log)"))
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                             }
@@ -592,6 +620,19 @@ struct ContentView: View {
                         .controlSize(.large)
                         .disabled(manager.isRunning)
                         .padding(.top, 4)
+                    }
+                    if let logURL = manager.logURL {
+                        ShareLink(item: logURL,
+                                  subject: Text("USB Backup – log"),
+                                  message: Text(tr("Log ostatniej kopii (nazwy plików i komunikaty błędów, bez zdjęć i lokalizacji).",
+                                                   "Log of the last backup (file names and error messages, no photos or location)."))) {
+                            Label(tr("Udostępnij log", "Share log"), systemImage: "square.and.arrow.up")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.large)
                     }
                 }
             }
