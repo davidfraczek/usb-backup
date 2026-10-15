@@ -15,6 +15,8 @@ Prywatna aplikacja na iPhone'a, która robi **przyrostową kopię zdjęć i film
 - **Historia kopii:** ostatnie 30 przebiegów (data, ile skopiowano, błędy, czas, weryfikacja), zapisana na dysku.
 - **Odporność na błędy:** „Spróbuj ponownie" dla nieudanych plików, ostrzeżenie i pytanie przy braku miejsca, czytelne komunikaty po odłączeniu dysku.
 - **Zabezpieczenia i powiadomienia:** ostrzeżenie przy niskiej baterii, powiadomienie o końcu kopii lub błędzie, eksport logu błędów do pliku tekstowego.
+- **Źródło:** cała biblioteka albo tylko zdjęcia i filmy z aparatu (przybliżone, patrz Ograniczenia).
+- **Wygląd:** trzy motywy kolorystyczne (Klasyczny, Zachód słońca, Las).
 - **Język:** polski i angielski (wybór w ustawieniach).
 
 ## Wymagania
@@ -36,6 +38,7 @@ Sources/
   AppSettings.swift           język i opcje kopii
   SettingsView.swift          ekran ustawień
   HistoryView.swift           historia kopii
+  Theme.swift                 motywy kolorystyczne
   Safety.swift                bateria, wykrywanie sieci komórkowej
   Notifier.swift              powiadomienia lokalne
   LogExport.swift             eksport logu
@@ -94,6 +97,8 @@ Przerwaną kopię uruchom ponownie. Wznowi się od miejsca przerwania.
 - Kopiowane są zdjęcia i filmy z biblioteki (także ukryte). Albumy, ulubione i Zdjęcia Współdzielone nie są odwzorowywane, a „Ostatnio usunięte" nie jest kopiowane.
 - Dysk z zasilaniem z telefonu zużywa baterię. Przy wymagających SSD przydaje się hub z zasilaniem.
 - Blokada sieci komórkowej dotyczy sieci uznanych przez iOS za „kosztowne" (komórkowa, Personal Hotspot).
+
+- „Tylko z aparatu" opiera się na typie źródła, braku zrzutów ekranu i nazwie pliku `IMG_xxxx`, bo iOS nie podaje, czy zdjęcie zrobiono aparatem. Zdjęcia z AirDrop mogą się załapać.
 
 ## Rozwiązywanie problemów
 
