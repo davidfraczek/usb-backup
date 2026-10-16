@@ -96,6 +96,7 @@ enum BackupEvent: Sendable {
     case assetFraction(Double)      // 0...1 – files finished within the current asset
     case bytesCopied(Int64)         // bytes copied so far in this run
     case iCloud(Double?)            // iCloud download progress for the current file, nil = none
+    case paused(Bool)               // the engine reached a pause point (true) / continues (false)
     case finished(BackupSummary)
 }
 
@@ -119,6 +120,8 @@ final class BackupManager: ObservableObject {
     @Published private(set) var iCloudProgress: Double?
     @Published private(set) var summary: BackupSummary?
     @Published private(set) var isCancelling = false
+    @Published private(set) var isPauseRequested = false     // the user tapped "Pause"
+    @Published private(set) var isPaused = false              // the engine is actually waiting (between two files)
     @Published private(set) var destinationURL: URL?
     @Published private(set) var plan: PlanInfo?
     @Published private(set) var drive: DriveInfo?
@@ -143,6 +146,12 @@ final class BackupManager: ObservableObject {
     private var needsReanalysis = false
     private var copyStart: Date?
     private var copiedBytes: Int64 = 0
+    private let pauseControl = PauseControl()
+    private var speedSamples: [(time: Date, bytes: Int64)] = []
+    private var pausedTotal: TimeInterval = 0
+    private var pauseStartedAt: Date?
+    private static let reminderID = "usbbackup.reminder"
+    private static let lastCompletedKey = "lastCompletedLocal"
     private var isRetryRun = false
     private static let backgroundNoticeID = "usbbackup.background"
     private static let finishedNoticeID = "usbbackup.finished"
@@ -205,6 +214,24 @@ final class BackupManager: ObservableObject {
 
     // MARK: Drive info (free space, last backup)
 
+    /// Deletes the backup history (list of runs). Not the photos, and not the "last backup" date.
+    func clearHistory() {
+        guard let url = destinationURL, !isRunning else { return }
+        drive?.history = []
+        Task {
+            _ = await Task.detached(priority: .utility) {
+                BackupEngine.clearHistory(root: url)
+            }.value
+            self.refreshDriveInfo()
+        }
+    }
+
+    /// Deletes the exported error log (and any older ones left in the temporary folder).
+    func clearLog() {
+        LogExport.deleteAll()
+        logURL = nil
+    }
+
     func refreshDriveInfo() {
         guard let url = destinationURL else { drive = nil; return }
         guard !isRefreshingDrive else { return }          // a read is already in flight (USB can be slow)
@@ -217,7 +244,14 @@ final class BackupManager: ObservableObject {
             guard url == self.destinationURL else { return }   // folder was changed meanwhile
 
             let wasConnected = self.drive?.totalBytes != nil
-            if self.drive != info { self.drive = info }
+            if self.drive != info {
+                self.drive = info
+                if let completed = info.lastCompleted {
+                    let stored = UserDefaults.standard.object(forKey: Self.lastCompletedKey) as? Date
+                    if stored == nil || completed > stored! { UserDefaults.standard.set(completed, forKey: Self.lastCompletedKey) }
+                    self.updateReminder()
+                }
+            }
             // The drive was just plugged in: measure the backup folder and analyze automatically
             // (the analysis only if Photos access was already granted).
             if !wasConnected, info.totalBytes != nil {
@@ -279,7 +313,7 @@ final class BackupManager: ObservableObject {
 
     /// The app left the screen while copying: iOS suspends it after a short while, so tell the user.
     func appDidEnterBackground() {
-        guard isCopying, options.notifyOnFinish else { return }
+        guard isCopying, !isPauseRequested, options.notifyOnFinish else { return }
         Task {
             await Notifier.post(id: Self.backgroundNoticeID,
                                 title: tr("Kopia może zostać wstrzymana", "The backup may be paused"),
@@ -290,6 +324,45 @@ final class BackupManager: ObservableObject {
 
     func appDidBecomeActive() {
         Notifier.remove(id: Self.backgroundNoticeID)
+        updateReminder()
+    }
+
+    // MARK: Reminder ("it's been a while since the last backup")
+
+    private var lastCompletedDate: Date? {
+        let stored = UserDefaults.standard.object(forKey: Self.lastCompletedKey) as? Date
+        return [drive?.lastCompleted, stored].compactMap { $0 }.max()
+    }
+
+    /// Schedules (or removes) the reminder: `reminderDays` after the last fully successful backup, at 18:00.
+    /// If that moment has already passed, the reminder comes in 3 days instead (no daily nagging).
+    func updateReminder() {
+        guard options.reminderDays > 0 else { Notifier.remove(id: Self.reminderID); return }
+        guard let last = lastCompletedDate else { return }       // no backup yet, nothing to remind about
+        let calendar = Calendar.current
+        func evening(_ date: Date) -> Date {
+            calendar.date(bySettingHour: 18, minute: 0, second: 0, of: date) ?? date
+        }
+        var fire = evening(calendar.date(byAdding: .day, value: options.reminderDays, to: last) ?? last)
+        if fire < Date().addingTimeInterval(3600) {
+            fire = evening(calendar.date(byAdding: .day, value: 3, to: Date()) ?? Date())
+        }
+        Task {
+            await Notifier.schedule(id: Self.reminderID,
+                                    title: tr("Czas na kopię zdjęć", "Time to back up your photos"),
+                                    body: tr("Od ostatniej kopii minęło trochę czasu. Podłącz dysk i uruchom kopię.",
+                                             "It's been a while since the last backup. Plug in the drive and start a backup."),
+                                    at: fire)
+        }
+    }
+
+    // MARK: Pause / resume
+
+    /// Pause takes effect after the file that is being copied right now (a single file can't be paused halfway).
+    func togglePause() {
+        guard isCopying, !isCancelling else { return }
+        isPauseRequested.toggle()
+        pauseControl.setPaused(isPauseRequested)
     }
 
     /// The user confirmed: copy as much as fits (oldest items first), the run stops cleanly when the drive is full.
@@ -320,6 +393,12 @@ final class BackupManager: ObservableObject {
     private func optionsDidChange(_ old: BackupOptions) {
         guard options != old else { return }
         options.save()
+        if options.reminderDays != old.reminderDays {
+            Task {
+                if options.reminderDays > 0 { await Notifier.requestAuthorizationIfNeeded() }
+                updateReminder()
+            }
+        }
         guard !options.sameContent(as: old) else { return }    // notification / battery / cellular options don't change the estimate
         plan = nil
         needsReanalysis = true
@@ -337,6 +416,8 @@ final class BackupManager: ObservableObject {
         guard isRunning else { return }
         isCancelling = true
         worker?.cancel()
+        isPauseRequested = false
+        pauseControl.setPaused(false)          // wakes the engine if it is waiting, so it can see the cancellation
     }
 
     private func launch(dryRun: Bool, retryIDs: [String]? = nil, force: Bool = false) {
@@ -349,6 +430,12 @@ final class BackupManager: ObservableObject {
         speedBytesPerSecond = nil
         copiedBytes = 0
         copyStart = nil
+        speedSamples = []
+        pausedTotal = 0
+        pauseStartedAt = nil
+        isPauseRequested = false
+        isPaused = false
+        pauseControl.setPaused(false)
         isCancelling = false
         analyzeOnly = dryRun
         if !dryRun {
@@ -393,10 +480,11 @@ final class BackupManager: ObservableObject {
 
         // 3. Run the engine off the main thread and listen to its events
         let settings = options
+        let pause = pauseControl
         let (stream, continuation) = AsyncStream.makeStream(of: BackupEvent.self)
         worker = Task.detached(priority: .userInitiated) {
             await BackupEngine.run(root: root, dryRun: dryRun, settings: settings,
-                                   retryIDs: retryIDs, force: force, emit: { continuation.yield($0) })
+                                   retryIDs: retryIDs, force: force, pause: pause, emit: { continuation.yield($0) })
             continuation.finish()
         }
 
@@ -444,12 +532,27 @@ final class BackupManager: ObservableObject {
         case .iCloud(let fraction):
             if let fraction, fraction < 1 { iCloudProgress = fraction } else { iCloudProgress = nil }
 
+        case .paused(let nowPaused):
+            isPaused = nowPaused
+            UIApplication.shared.isIdleTimerDisabled = !nowPaused      // let the screen sleep while paused
+            if nowPaused {
+                pauseStartedAt = Date()
+                etaSeconds = nil
+                speedBytesPerSecond = nil
+            } else {
+                if let started = pauseStartedAt { pausedTotal += Date().timeIntervalSince(started) }
+                pauseStartedAt = nil
+                speedSamples = []                                      // the pause must not distort the speed
+            }
+
         case .finished(let result):
             if analyzeOnly || result.blockedForSpace {     // analysis only / not started because of missing space: no result screen
                 phase = .idle
                 return
             }
             summary = result
+            isPaused = false
+            isPauseRequested = false
             let planAtStart = plan
             iCloudProgress = nil
             etaSeconds = nil
@@ -488,6 +591,10 @@ final class BackupManager: ObservableObject {
         logURL = LogExport.write(summary: result, outcome: outcome, drive: drive, plan: plan,
                                  options: options, folderName: folderName, folderBytes: folderBytes)
         notifyFinished(result)
+        if result.abortReason == nil, !result.cancelled, result.failedAssets == 0, !result.blockedForSpace {
+            UserDefaults.standard.set(Date(), forKey: Self.lastCompletedKey)
+        }
+        updateReminder()
     }
 
     private func notifyFinished(_ r: BackupSummary) {
@@ -515,18 +622,24 @@ final class BackupManager: ObservableObject {
         Task { await Notifier.post(id: Self.finishedNoticeID, title: title, body: body) }
     }
 
+    /// Speed = bytes copied during the last minute (so one slow iCloud download doesn't skew it for the rest of the run);
+    /// time left = what is still to copy divided by that speed. Time spent paused is not counted.
     private func updateETA() {
-        guard let start = copyStart, case .copying(let index, let total, _) = phase else { return }
-        let elapsed = Date().timeIntervalSince(start)
-        guard elapsed > 5 else { return }
+        guard !isPaused, let start = copyStart, case .copying(let index, let total, _) = phase else { return }
+        let now = Date()
+        speedSamples.append((now, copiedBytes))
+        speedSamples.removeAll { now.timeIntervalSince($0.time) > 60 }
 
-        if copiedBytes > 0 {
-            speedBytesPerSecond = Double(copiedBytes) / elapsed
+        if let first = speedSamples.first, now.timeIntervalSince(first.time) >= 5, copiedBytes > first.bytes {
+            let speed = Double(copiedBytes - first.bytes) / now.timeIntervalSince(first.time)
+            speedBytesPerSecond = speed
+            if let plan, plan.pendingBytes > 0 {
+                etaSeconds = Double(max(plan.pendingBytes - copiedBytes, 0)) / speed
+                return
+            }
         }
-        if let plan, plan.pendingBytes > 0, copiedBytes > 0 {
-            let remaining = max(plan.pendingBytes - copiedBytes, 0)
-            etaSeconds = Double(remaining) / (Double(copiedBytes) / elapsed)
-        } else if index > 1 {
+        let elapsed = now.timeIntervalSince(start) - pausedTotal
+        if elapsed > 5, index > 1, plan?.pendingBytes ?? 0 == 0 {
             etaSeconds = elapsed / Double(index - 1) * Double(total - index + 1)
         }
     }
@@ -629,6 +742,7 @@ enum BackupEngine {
                                 settings: BackupOptions,
                                 retryIDs: [String]?,
                                 force: Bool,
+                                pause: PauseControl,
                                 emit: @escaping @Sendable (BackupEvent) -> Void) async {
         var summary = BackupSummary()
         let fm = FileManager.default
@@ -650,6 +764,22 @@ enum BackupEngine {
         case .videos:
             options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.video.rawValue)
         }
+        let bounds = settings.dateBounds()
+        if bounds.from != nil || bounds.to != nil {
+            var parts: [NSPredicate] = []
+            if let base = options.predicate { parts.append(base) }
+            if let from = bounds.from { parts.append(NSPredicate(format: "creationDate >= %@", from as NSDate)) }
+            if let to = bounds.to { parts.append(NSPredicate(format: "creationDate <= %@", to as NSDate)) }
+            options.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: parts)
+        }
+        // Album filter: the set of items that are in the chosen albums
+        let albumSet: Set<String>? = settings.albumMode == .all ? nil : albumAssetIDs(settings.albumIDs)
+
+        // albums.json: which albums / favorites / hidden items belong to which file (not for partial "try again" runs)
+        let wantMeta = settings.saveAlbumInfo && retryIDs == nil && !dryRun
+        let membership: [String: [String]] = wantMeta ? albumMembership() : [:]
+        var meta: [AlbumMetaEntry] = []
+
         let fetch: PHFetchResult<PHAsset>
         if let retryIDs {
             fetch = PHAsset.fetchAssets(withLocalIdentifiers: retryIDs, options: options)
@@ -669,6 +799,13 @@ enum BackupEngine {
 
         fetch.enumerateObjects { asset, _, stop in
             if Task.isCancelled { stop.pointee = true; return }
+            if let albumSet {
+                let inAlbums = albumSet.contains(asset.localIdentifier)
+                if (settings.albumMode == .only && !inAlbums) || (settings.albumMode == .exclude && inAlbums) {
+                    checked += 1
+                    return
+                }
+            }
             if settings.source == .camera && !isCameraAsset(asset) { checked += 1; return }
 
             let plan = planFiles(for: asset, root: root, fm: fm, settings: settings, cache: folderCache, reserved: &reserved)
@@ -682,6 +819,11 @@ enum BackupEngine {
                 for file in plan.missing {
                     if file.size > 0 { info.pendingBytes += file.size } else { info.unknownSizeFiles += 1 }
                 }
+            }
+            if wantMeta, let url = plan.primary,
+               asset.isFavorite || asset.isHidden || membership[asset.localIdentifier] != nil {
+                meta.append(AlbumMetaEntry(url: url, favorite: asset.isFavorite, hidden: asset.isHidden,
+                                           albums: membership[asset.localIdentifier] ?? []))
             }
             checked += 1
             if checked % 100 == 0 { emit(.scanning(checked: checked, total: total)) }
@@ -728,6 +870,10 @@ enum BackupEngine {
                                               "The drive was disconnected. \(summary.copiedAssets) items were copied before the backup stopped. Plug it back in and run the backup again – it will resume where it stopped.")
                 break
             }
+
+            // Paused by the user: wait here (between two files) until resumed or cancelled
+            await pause.waitIfPaused(onPause: { emit(.paused(true)) }, onResume: { emit(.paused(false)) })
+            if Task.isCancelled { summary.cancelled = true; break }
 
             emit(.copying(index: i + 1, total: pending.count, name: item.displayName))
 
@@ -826,8 +972,49 @@ enum BackupEngine {
         summary.duration = Date().timeIntervalSince(runStart)
         summary.markerWarning = saveMarker(root: root, status: status, summary: summary, isRetry: retryIDs != nil)
 
+        if wantMeta && !summary.cancelled && summary.abortReason == nil {
+            _ = writeAlbumInfo(root: root, entries: meta, fm: fm)
+        }
+
         emit(.iCloud(nil))
         emit(.finished(summary))
+    }
+
+    // MARK: albums.json
+
+    /// Writes `albums.json` next to the backup: for every album, favorite and hidden item the path of its file on the drive,
+    /// so albums and hearts can be rebuilt later. Only files that really exist on the drive are listed.
+    nonisolated private static func writeAlbumInfo(root: URL, entries: [AlbumMetaEntry], fm: FileManager) -> Bool {
+        let rootPath = root.standardizedFileURL.path
+        func relative(_ url: URL) -> String? {
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(rootPath + "/"), fm.fileExists(atPath: path) else { return nil }
+            return String(path.dropFirst(rootPath.count + 1))
+        }
+        var albums: [String: [String]] = [:]
+        var favorites: [String] = []
+        var hidden: [String] = []
+        for entry in entries {
+            guard let path = relative(entry.url) else { continue }
+            if entry.favorite { favorites.append(path) }
+            if entry.hidden { hidden.append(path) }
+            for title in entry.albums { albums[title, default: []].append(path) }
+        }
+        let file = AlbumInfoFile(version: 1,
+                                 generated: Date(),
+                                 albums: albums.keys.sorted().map { AlbumInfoFile.Album(title: $0, items: (albums[$0] ?? []).sorted()) },
+                                 favorites: favorites.sorted(),
+                                 hidden: hidden.sorted())
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(file) else { return false }
+        do {
+            try data.write(to: root.appendingPathComponent("albums.json"))      // plain write: atomic writes can fail on exFAT
+            return true
+        } catch {
+            return false
+        }
     }
 
     // MARK: Drive info & last backup
@@ -857,6 +1044,25 @@ enum BackupEngine {
             info.history = marker.history ?? []
         }
         return info
+    }
+
+    /// Empties the history list in both copies (on the drive and in the app). The date of the last backup is kept.
+    nonisolated static func clearHistory(root: URL) -> Bool {
+        let scoped = root.startAccessingSecurityScopedResource()
+        defer { if scoped { root.stopAccessingSecurityScopedResource() } }
+        guard var marker = loadMarker(root: root) else { return true }     // nothing stored, nothing to clear
+        marker.history = []
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(marker) else { return false }
+        UserDefaults.standard.set(data, forKey: defaultsKey(for: root))
+        do {
+            try data.write(to: root.appendingPathComponent(markerName))
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Total size of all files inside `root` (nil if the folder can't be read).
@@ -966,33 +1172,43 @@ enum BackupEngine {
                                               fm: FileManager,
                                               settings: BackupOptions,
                                               cache: FolderCache,
-                                              reserved: inout Set<String>) -> (missing: [PendingFile], existing: Int, name: String) {
+                                              reserved: inout Set<String>) -> (missing: [PendingFile], existing: Int, name: String, primary: URL?) {
         let resources = PHAssetResource.assetResources(for: asset)
         guard let primary = resources.first(where: { $0.type == .photo || $0.type == .video }) ?? resources.first else {
-            return ([], 0, "")
+            return ([], 0, "", nil)
         }
         let stem = (primary.originalFilename as NSString).deletingPathExtension
-        let folder = folderURL(root: root, date: asset.creationDate, layout: settings.layout)
-        // Files backed up earlier under another folder layout still count as "already on the drive".
-        let alternateFolders = FolderLayout.allCases
-            .filter { $0 != settings.layout }
-            .map { folderURL(root: root, date: asset.creationDate, layout: $0) }
-            .filter { $0 != folder && cache.exists($0, fm: fm) }
+        let category = settings.split == .off ? nil : settings.split.folder(for: assetKind(asset))
+        let folder = folderURL(root: root, date: asset.creationDate, layout: settings.layout, category: category)
+        // Files backed up earlier under another folder layout (or with a different sub-folder split)
+        // still count as "already on the drive".
+        let categories: [String?] = [nil] + AssetKind.allFolderNames.map { Optional($0) }
+        var alternateFolders: [URL] = []
+        for layout in FolderLayout.allCases {
+            for cat in categories {
+                let url = folderURL(root: root, date: asset.creationDate, layout: layout, category: cat)
+                if url != folder && !alternateFolders.contains(url) && cache.exists(url, fm: fm) {
+                    alternateFolders.append(url)
+                }
+            }
+        }
 
         var missing: [PendingFile] = []
         var existing = 0
+        var primaryURL: URL?
 
         for resource in resources {
             guard let name = targetName(for: resource, stem: stem, includeEdited: settings.includeEdited) else { continue }
             let resolved = resolve(name: name, folder: folder, alternateFolders: alternateFolders,
                                    date: asset.creationDate, fm: fm, reserved: &reserved)
+            if resource === primary { primaryURL = resolved.url }
             if resolved.exists {
                 existing += 1
             } else {
                 missing.append(PendingFile(resource: resource, destination: resolved.url, size: fileSize(of: resource)))
             }
         }
-        return (missing, existing, primary.originalFilename)
+        return (missing, existing, primary.originalFilename, primaryURL)
     }
 
     /// iOS has no public API for a resource's size. `fileSize` is an undocumented but long-stable property;
@@ -1069,8 +1285,9 @@ enum BackupEngine {
         return false
     }
 
-    nonisolated private static func folderURL(root: URL, date: Date?, layout: FolderLayout) -> URL {
+    nonisolated private static func folderURL(root: URL, date: Date?, layout: FolderLayout, category: String? = nil) -> URL {
         var url = root
+        if let category { url.appendPathComponent(category, isDirectory: true) }
         for part in layout.pathComponents(for: date) {
             url.appendPathComponent(part, isDirectory: true)
         }
@@ -1194,14 +1411,106 @@ enum BackupEngine {
 
 // MARK: - "Camera only" filter
 
+/// What `albums.json` stores about one item.
+struct AlbumMetaEntry: Sendable {
+    let url: URL
+    let favorite: Bool
+    let hidden: Bool
+    let albums: [String]
+}
+
+struct AlbumInfoFile: Codable {
+    struct Album: Codable {
+        let title: String
+        let items: [String]
+    }
+    let version: Int
+    let generated: Date
+    let albums: [Album]
+    let favorites: [String]
+    let hidden: [String]
+}
+
+/// Photo identifier -> titles of the user's own albums it belongs to.
+nonisolated func albumMembership() -> [String: [String]] {
+    var result: [String: [String]] = [:]
+    PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil)
+        .enumerateObjects { collection, _, _ in
+            let title = collection.localizedTitle ?? "—"
+            PHAsset.fetchAssets(in: collection, options: nil).enumerateObjects { asset, _, _ in
+                result[asset.localIdentifier, default: []].append(title)
+            }
+        }
+    return result
+}
+
+/// Local identifiers of everything that is in the given albums.
+nonisolated func albumAssetIDs(_ albumIDs: [String]) -> Set<String> {
+    var result = Set<String>()
+    guard !albumIDs.isEmpty else { return result }
+    let collections = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: albumIDs, options: nil)
+    collections.enumerateObjects { collection, _, _ in
+        let assets = PHAsset.fetchAssets(in: collection, options: nil)
+        assets.enumerateObjects { asset, _, _ in result.insert(asset.localIdentifier) }
+    }
+    return result
+}
+
 /// Best-effort check whether an item was shot with the device camera.
 /// iOS has no "taken with camera" flag, so this combines what is known: the item lives in the user's own library
-/// (not synced from a computer or shared), it is not a screenshot or screen recording, and its original file name
+/// (not synced from a computer or shared), it is not a screenshot (screen recordings have non-camera names), and its original file name
 /// has the camera pattern (IMG_1234, MVI_1234, PANO_1234). Photos received via AirDrop keep such names and
 /// cannot be told apart.
 nonisolated func isCameraAsset(_ asset: PHAsset) -> Bool {
-    if asset.sourceType != .typeUserLibrary { return false }
-    if asset.mediaSubtypes.contains(.photoScreenshot) { return false }
-    guard let name = PHAssetResource.assetResources(for: asset).first?.originalFilename else { return false }
-    return name.range(of: #"^(IMG|MVI|PANO)_[0-9]+\.[A-Za-z0-9]+$"#, options: [.regularExpression, .caseInsensitive]) != nil
+    assetKind(asset) == .camera
+}
+
+/// Screenshot, camera shot, or anything else (saved from the web or a messenger, AirDrop, synced from a computer …).
+nonisolated func assetKind(_ asset: PHAsset) -> AssetKind {
+    if asset.mediaSubtypes.contains(.photoScreenshot) { return .screenshot }
+    let name = PHAssetResource.assetResources(for: asset).first?.originalFilename ?? ""
+    if name.range(of: #"^RPReplay"#, options: [.regularExpression, .caseInsensitive]) != nil { return .screenshot }   // screen recordings
+    if asset.sourceType != .typeUserLibrary { return .other }
+    if name.range(of: #"^(IMG|MVI|PANO)_[0-9]+\.[A-Za-z0-9]+$"#, options: [.regularExpression, .caseInsensitive]) != nil { return .camera }
+    return .other
+}
+
+// MARK: - Pause control
+
+/// Lets the UI pause the engine between two files. The engine calls `waitIfPaused()` before each file.
+final class PauseControl: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paused = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func setPaused(_ value: Bool) {
+        lock.lock()
+        paused = value
+        let toWake = value ? [] : waiters
+        if !value { waiters = [] }
+        lock.unlock()
+        toWake.forEach { $0.resume() }
+    }
+
+    private var isPaused: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return paused
+    }
+
+    func waitIfPaused(onPause: () -> Void, onResume: () -> Void) async {
+        guard isPaused else { return }
+        onPause()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if paused {
+                waiters.append(continuation)
+                lock.unlock()
+            } else {
+                lock.unlock()
+                continuation.resume()
+            }
+        }
+        onResume()
+    }
 }

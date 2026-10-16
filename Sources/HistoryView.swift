@@ -4,6 +4,7 @@ import SwiftUI
 struct HistoryView: View {
     @ObservedObject var manager: BackupManager
     @Environment(\.dismiss) private var dismiss
+    @State private var confirmClear = false
 
     private var runs: [RunRecord] { manager.drive?.history ?? [] }
 
@@ -22,10 +23,30 @@ struct HistoryView: View {
             .navigationTitle(tr("Historia kopii", "Backup history"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    if !runs.isEmpty {
+                        Button(role: .destructive) {
+                            confirmClear = true
+                        } label: {
+                            Label(tr("Wyczyść", "Clear"), systemImage: "trash")
+                        }
+                        .disabled(manager.isRunning)
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(tr("Gotowe", "Done")) { dismiss() }
                         .fontWeight(.semibold)
                 }
+            }
+            .confirmationDialog(tr("Wyczyścić historię kopii?", "Clear the backup history?"),
+                                isPresented: $confirmClear, titleVisibility: .visible) {
+                Button(tr("Wyczyść historię", "Clear history"), role: .destructive) {
+                    manager.clearHistory()
+                }
+                Button(tr("Anuluj", "Cancel"), role: .cancel) { }
+            } message: {
+                Text(tr("Usunie listę przebiegów z dysku i z aplikacji. Zdjęcia na dysku i data ostatniej kopii zostają.",
+                        "Removes the list of runs from the drive and the app. The photos on the drive and the last backup date stay."))
             }
         }
     }

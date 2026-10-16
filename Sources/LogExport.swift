@@ -4,6 +4,16 @@ import UIKit
 /// It contains file names and error messages, but no photo content and no location data.
 enum LogExport {
 
+    /// Removes every exported log file from the temporary folder.
+    nonisolated static func deleteAll() {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+        let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for file in files where file.lastPathComponent.hasPrefix("USB-Backup-log-") {
+            try? fm.removeItem(at: file)
+        }
+    }
+
     @MainActor
     static func write(summary: BackupSummary,
                       outcome: String,
@@ -35,6 +45,8 @@ enum LogExport {
         lines.append("Media: \(options.media.rawValue)")
         lines.append("Edited versions: \(options.includeEdited)")
         lines.append("Folder layout: \(options.layout.rawValue)")
+        lines.append("Date range: \(options.dateMode.rawValue)")
+        lines.append("Albums: \(options.albumMode.rawValue) (\(options.albumIDs.count) selected)")
         lines.append("iCloud over cellular: \(options.allowCellular)")
         lines.append("")
 

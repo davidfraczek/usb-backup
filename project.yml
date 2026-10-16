@@ -24,6 +24,7 @@ targets:
       properties:
         CFBundleDisplayName: USB Backup
         NSPhotoLibraryUsageDescription: This app reads your photos and videos to back them up to your external drive.
+        NSFaceIDUsageDescription: Face ID unlocks the app so that nobody else can open your photo backup.
         CFBundleLocalizations: [en, pl]
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:

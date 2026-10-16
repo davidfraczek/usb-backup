@@ -1,2 +1,3 @@
 "NSPhotoLibraryUsageDescription" = "This app reads your photos and videos to back them up to your external drive.";
 "CFBundleDisplayName" = "USB Backup";
+"NSFaceIDUsageDescription" = "Face ID unlocks the app so that nobody else can open your photo backup.";

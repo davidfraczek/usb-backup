@@ -70,10 +70,31 @@ enum ThemeStore {
 struct RootView: View {
     @AppStorage(ThemeStore.storageKey) private var themeRaw = AppTheme.classic.rawValue
 
+    @StateObject private var lock = AppLock()
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some View {
         let theme = AppTheme(rawValue: themeRaw) ?? .classic
-        ContentView()
-            .environment(\.appTheme, theme)
-            .tint(theme.accent)
+        let locked = lock.isEnabled && lock.isLocked
+        ZStack {
+            ContentView()
+                .environmentObject(lock)
+                .accessibilityHidden(locked)
+            if locked {
+                LockScreenView(lock: lock)
+                    .zIndex(1)
+            } else if lock.isEnabled && scenePhase != .active {
+                // hides the content in the app switcher
+                Color(.systemBackground)
+                    .ignoresSafeArea()
+                    .overlay(Image(systemName: "lock.fill").font(.largeTitle).foregroundStyle(.secondary))
+                    .zIndex(1)
+            }
+        }
+        .environment(\.appTheme, theme)
+        .tint(theme.accent)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { lock.lockIfEnabled() }
+        }
     }
 }

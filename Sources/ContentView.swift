@@ -51,6 +51,7 @@ struct ContentView: View {
     private let errorListLimit = 50
     @AppStorage(Lang.storageKey) private var languageRaw = AppLanguage.system.rawValue
     @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject private var lock: AppLock
 
     var body: some View {
         ZStack {
@@ -116,6 +117,13 @@ struct ContentView: View {
                 .environment(\.locale, Lang.localeForCode(languageRaw))
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+        }
+        .onChange(of: lock.isLocked) { _, locked in
+            // sheets would stay on top of the lock screen
+            if locked {
+                showingSettings = false
+                showingHistory = false
+            }
         }
         .onAppear {
             manager.refreshDriveInfo()
@@ -520,9 +528,18 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
 
                 HStack(spacing: 10) {
-                    ProgressView()
-                    Text(tr("Kopiowanie \(index) z \(total)", "Copying \(index) of \(total)"))
-                        .font(.system(.headline, design: .rounded))
+                    if manager.isPaused {
+                        Image(systemName: "pause.circle.fill")
+                            .foregroundStyle(.orange)
+                        Text(tr("Wstrzymano (\(index) z \(total))", "Paused (\(index) of \(total))"))
+                            .font(.system(.headline, design: .rounded))
+                    } else {
+                        ProgressView()
+                        Text(manager.isPauseRequested
+                             ? tr("Wstrzymuję po bieżącym pliku…", "Pausing after the current file…")
+                             : tr("Kopiowanie \(index) z \(total)", "Copying \(index) of \(total)"))
+                            .font(.system(.headline, design: .rounded))
+                    }
                 }
 
                 ProgressView(value: manager.overallProgress)
@@ -538,8 +555,9 @@ struct ContentView: View {
                         Label("\(formatBytes(Int64(speed)))/s", systemImage: "speedometer")
                     }
                     Spacer()
-                    if let eta = manager.etaSeconds {
-                        Label(tr("Pozostało ok. \(durationText(eta))", "About \(durationText(eta)) left"),
+                    if let eta = manager.etaSeconds, !manager.isPaused {
+                        Label(tr("Pozostało ok. \(durationText(eta)) (koniec ok. \(finishTime(eta)))",
+                                 "About \(durationText(eta)) left (done around \(finishTime(eta)))"),
                               systemImage: "clock")
                     }
                 }
@@ -634,6 +652,17 @@ struct ContentView: View {
                         .buttonStyle(.bordered)
                         .buttonBorderShape(.capsule)
                         .controlSize(.large)
+
+                        Button(role: .destructive) {
+                            manager.clearLog()
+                        } label: {
+                            Label(tr("Usuń log", "Delete log"), systemImage: "trash")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.large)
                     }
                 }
             }
@@ -670,6 +699,17 @@ struct ContentView: View {
 
     // MARK: Buttons
 
+    private var pauseButtonTitle: String {
+        if manager.isPaused { return tr("Wznów kopię", "Resume backup") }
+        if manager.isPauseRequested { return tr("Cofnij wstrzymanie", "Cancel pause") }
+        return tr("Wstrzymaj kopię", "Pause backup")
+    }
+
+    private func finishTime(_ secondsLeft: TimeInterval) -> String {
+        Date().addingTimeInterval(secondsLeft)
+            .formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: Lang.locale))
+    }
+
     private var isVerifying: Bool {
         if case .verifying = manager.phase { return true }
         return false
@@ -685,6 +725,14 @@ struct ContentView: View {
     private var actionButtons: some View {
         VStack(spacing: 12) {
             if manager.isCopying {
+                Button {
+                    manager.togglePause()
+                } label: {
+                    Label(pauseButtonTitle, systemImage: manager.isPauseRequested ? "play.fill" : "pause.fill")
+                }
+                .buttonStyle(PrimaryButtonStyle(colors: theme.gradient))
+                .disabled(manager.isCancelling || isVerifying)
+
                 Button(role: .destructive) {
                     manager.cancel()
                 } label: {

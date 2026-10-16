@@ -16,6 +16,11 @@ Prywatna aplikacja na iPhone'a, która robi **przyrostową kopię zdjęć i film
 - **Odporność na błędy:** „Spróbuj ponownie" dla nieudanych plików, ostrzeżenie i pytanie przy braku miejsca, czytelne komunikaty po odłączeniu dysku.
 - **Zabezpieczenia i powiadomienia:** ostrzeżenie przy niskiej baterii, powiadomienie o końcu kopii lub błędzie, eksport logu błędów do pliku tekstowego.
 - **Źródło:** cała biblioteka albo tylko zdjęcia i filmy z aparatu (przybliżone, patrz Ograniczenia).
+- **Filtry:** zakres dat oraz wybór albumów (tylko wybrane albo pomiń wybrane).
+- **Podział na foldery:** opcjonalnie zrzuty ekranu osobno albo Camera / Screenshots / Other.
+- **albums.json:** zapis albumów, ulubionych i ukrytych zdjęć (ścieżki plików), by dało się je odtworzyć.
+- **Pauza i wznowienie** kopii, czas do końca z godziną zakończenia, **przypomnienie** o kopii po 7/14/30 dniach.
+- **Blokada aplikacji:** PIN 4-cyfrowy i Face ID / Touch ID.
 - **Wygląd:** trzy motywy kolorystyczne (Klasyczny, Zachód słońca, Las).
 - **Język:** polski i angielski (wybór w ustawieniach).
 
@@ -38,6 +43,8 @@ Sources/
   AppSettings.swift           język i opcje kopii
   SettingsView.swift          ekran ustawień
   HistoryView.swift           historia kopii
+  AlbumPickerView.swift       wybór albumów
+  AppLock.swift               blokada PIN / Face ID
   Theme.swift                 motywy kolorystyczne
   Safety.swift                bateria, wykrywanie sieci komórkowej
   Notifier.swift              powiadomienia lokalne
@@ -94,7 +101,7 @@ Przerwaną kopię uruchom ponownie. Wznowi się od miejsca przerwania.
 - Kopia działa tylko, gdy aplikacja jest na ekranie.
 - Weryfikacja porównuje **rozmiary**, a nie sumy kontrolne. Nie wykryje uszkodzenia, które zachowuje rozmiar.
 - Rozmiar kopii jest szacunkiem (iOS oficjalnie nie podaje rozmiarów zdjęć). Wartość z „~" oznacza, że dla części plików rozmiaru nie ma.
-- Kopiowane są zdjęcia i filmy z biblioteki (także ukryte). Albumy, ulubione i Zdjęcia Współdzielone nie są odwzorowywane, a „Ostatnio usunięte" nie jest kopiowane.
+- Kopiowane są zdjęcia i filmy z biblioteki (także ukryte). Albumy i ulubione nie są odwzorowywane w strukturze folderów (są zapisane w `albums.json`), Zdjęcia Współdzielone nie są kopiowane, a „Ostatnio usunięte" nie jest kopiowane.
 - Dysk z zasilaniem z telefonu zużywa baterię. Przy wymagających SSD przydaje się hub z zasilaniem.
 - Blokada sieci komórkowej dotyczy sieci uznanych przez iOS za „kosztowne" (komórkowa, Personal Hotspot).
 
