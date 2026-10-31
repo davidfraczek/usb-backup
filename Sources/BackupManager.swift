@@ -1199,13 +1199,14 @@ enum BackupEngine {
 
         for resource in resources {
             guard let name = targetName(for: resource, stem: stem, includeEdited: settings.includeEdited) else { continue }
+            let resourceSize = fileSize(of: resource)
             let resolved = resolve(name: name, folder: folder, alternateFolders: alternateFolders,
-                                   date: asset.creationDate, fm: fm, reserved: &reserved)
+                                   date: asset.creationDate, size: resourceSize, fm: fm, reserved: &reserved)
             if resource === primary { primaryURL = resolved.url }
             if resolved.exists {
                 existing += 1
             } else {
-                missing.append(PendingFile(resource: resource, destination: resolved.url, size: fileSize(of: resource)))
+                missing.append(PendingFile(resource: resource, destination: resolved.url, size: resourceSize))
             }
         }
         return (missing, existing, primary.originalFilename, primaryURL)
@@ -1242,6 +1243,7 @@ enum BackupEngine {
                                             folder: URL,
                                             alternateFolders: [URL],
                                             date: Date?,
+                                            size: Int64,
                                             fm: FileManager,
                                             reserved: inout Set<String>) -> (url: URL, exists: Bool) {
         let stem = (name as NSString).deletingPathExtension
@@ -1256,7 +1258,7 @@ enum BackupEngine {
             if reserved.contains(key) { continue }
 
             if fm.fileExists(atPath: url.path) {
-                if looksLikeSameFile(url, date: date, fm: fm) {
+                if looksLikeSameFile(url, date: date, size: size, fm: fm) {
                     reserved.insert(key)
                     return (url, true)
                 }
@@ -1266,7 +1268,7 @@ enum BackupEngine {
             // Not in the current layout: maybe it was backed up earlier under another folder layout.
             for alternate in alternateFolders {
                 let other = alternate.appendingPathComponent(candidate)
-                if fm.fileExists(atPath: other.path), looksLikeSameFile(other, date: date, fm: fm) {
+                if fm.fileExists(atPath: other.path), looksLikeSameFile(other, date: date, size: size, fm: fm) {
                     reserved.insert(key)
                     return (other, true)
                 }
@@ -1276,11 +1278,21 @@ enum BackupEngine {
         }
     }
 
-    nonisolated private static func looksLikeSameFile(_ url: URL, date: Date?, fm: FileManager) -> Bool {
+    /// Is the same-named file on the drive the backup of this item?
+    /// 1. Same size as the original (when iOS reports it): yes. A different photo with the same name AND exactly the same size is practically impossible.
+    /// 2. Same date, within a few seconds: yes.
+    /// 3. Same date, but shifted by whole hours: yes. FAT/exFAT drives store local time without a time zone, so after the
+    ///    switch between summer and winter time (or a time zone change) every stored date moves by an hour.
+    nonisolated private static func looksLikeSameFile(_ url: URL, date: Date?, size: Int64, fm: FileManager) -> Bool {
         guard let date else { return true }
         guard let attrs = try? fm.attributesOfItem(atPath: url.path) else { return false }
+        if size > 0, let onDrive = (attrs[.size] as? NSNumber)?.int64Value, onDrive == size { return true }
         for key in [FileAttributeKey.creationDate, .modificationDate] {
-            if let d = attrs[key] as? Date, abs(d.timeIntervalSince(date)) <= dateTolerance { return true }
+            guard let d = attrs[key] as? Date else { continue }
+            let diff = abs(d.timeIntervalSince(date))
+            if diff <= dateTolerance { return true }
+            let hours = (diff / 3600).rounded()
+            if hours >= 1, hours <= 14, abs(diff - hours * 3600) <= dateTolerance { return true }
         }
         return false
     }

@@ -1,3 +1,14 @@
+# PILNE: poprawka „chce kopiować wszystko od nowa" po zmianie czasu
+
+**Przyczyna (najbardziej prawdopodobna):** zmiana czasu z letniego na zimowy (25 października). Pendrive w formacie FAT/exFAT zapisuje daty plików jako czas lokalny **bez strefy czasowej**, więc po zmianie czasu wszystkie daty z okresu letniego „przesunęły się" o godzinę. Aplikacja rozpoznawała skopiowane pliki po nazwie i dacie (z tolerancją 3 sekund), więc uznała je za inne pliki. Aktualizacja iOS to raczej nie ten powód.
+
+**Poprawka:** teraz plik jest uznawany za już skopiowany, gdy ma tę samą nazwę i **ten sam rozmiar** co oryginał, albo gdy daty różnią się o pełną liczbę godzin (przesunięcie czasu). Dzięki temu zmiana czasu nie powtórzy tego problemu.
+
+**Co zrobić:**
+1. **Nie uruchamiaj kopii na starej wersji.** Zainstaluj tę aktualizację (podmień folder `Sources`, Build IPA, Sideloadly).
+2. Dotknij „Sprawdź, ile zostało". Powinno pokazać tylko nowe zdjęcia z ostatnich dni.
+3. Jeśli kopia już ruszyła i skopiowała dużo plików, na dysku mogły powstać duplikaty z końcówką `_1`, `_2` (np. `IMG_1234_1.HEIC`). Nic z nich nie jest kasowane przez aplikację. Napisz do mnie, przygotuję skrypt na Windows, który znajdzie identyczne pliki i pozwoli je bezpiecznie usunąć.
+
 # Aktualizacja: wybór źródła (cała biblioteka / tylko z aparatu) i motywy kolorystyczne
 
 Wszystko jest w **Ustawieniach** (zębatka). Dotychczasowe ustawienia zostają.
