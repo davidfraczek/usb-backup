@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>USB Backup – kopia zdjęć z iPhone’a na pendrive lub dysk SSD</title>
+<meta name="description" content="USB Backup to prywatna, darmowa aplikacja na iPhone’a, która robi przyrostową kopię zdjęć i filmów prosto na pendrive lub dysk SSD. Bez chmury, bez kont, bez serwerów.">
+<meta name="theme-color" content="#4F46E5">
+<meta property="og:type" content="website">
+<meta property="og:title" content="USB Backup – kopia zdjęć z iPhone’a na pendrive">
+<meta property="og:description" content="Przyrostowa kopia zdjęć i filmów prosto na pendrive lub dysk SSD. Bez chmury, bez kont, bez serwerów.">
+<meta property="og:locale" content="pl_PL">
+<meta property="og:locale:alternate" content="en_US">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%234F46E5'/%3E%3Cpath d='M32 14v26M22 30l10 10 10-10M20 48h24' fill='none' stroke='white' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
+<script>
+/* Motyw ustawiany przed renderem, żeby uniknąć mignięcia */
+(function(){var d=document.documentElement;d.classList.add('js');try{var t=localStorage.getItem('ub-theme');if(t==='light'||t==='dark')d.setAttribute('data-theme',t)}catch(e){}})();
+</script>
+<style>
+:root{--bg:#fff;--bg2:#F5F6FB;--card:#fff;--text:#0F172A;--muted:#55607A;--line:#E3E6F0;--accent:#4F46E5;--accent2:#2563EB;--accent-text:#4338CA;--soft:#EEF0FF;--shadow:0 10px 30px rgba(30,41,99,.08);--shadow-lg:0 30px 70px rgba(37,53,160,.25);--grad:linear-gradient(135deg,#4F46E5,#2563EB);--nav-bg:rgba(255,255,255,.82);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0B1020;--bg2:#0F1630;--card:#131B36;--text:#EAEEF9;--muted:#A5AEC6;--line:#232D4F;--accent-text:#A5B4FC;--soft:#1A2347;--shadow:0 10px 30px rgba(0,0,0,.35);--shadow-lg:0 30px 70px rgba(0,0,0,.5);--nav-bg:rgba(11,16,32,.82);color-scheme:dark}}
+:root[data-theme=dark]{--bg:#0B1020;--bg2:#0F1630;--card:#131B36;--text:#EAEEF9;--muted:#A5AEC6;--line:#232D4F;--accent-text:#A5B4FC;--soft:#1A2347;--shadow:0 10px 30px rgba(0,0,0,.35);--shadow-lg:0 30px 70px rgba(0,0,0,.5);--nav-bg:rgba(11,16,32,.82);color-scheme:dark}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:80px;-webkit-text-size-adjust:100%}
+body{margin:0;font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;overflow-x:clip;-webkit-font-smoothing:antialiased}
+h1,h2,h3,p,ul,ol{margin:0}ul,ol{padding:0;list-style:none}
+a{color:var(--accent-text)}
+:focus-visible{outline:3px solid var(--accent-text);outline-offset:3px;border-radius:8px}
+.skip{position:absolute;left:-999px;top:8px;background:var(--accent);color:#fff;padding:10px 14px;border-radius:10px;z-index:100}.skip:focus{left:8px}
+.wrap{max-width:1160px;margin:0 auto;padding:0 20px}
+.i{width:1.25em;height:1.25em;flex:none;vertical-align:middle}
+/* nav */
+header{position:sticky;top:0;z-index:50;background:var(--nav-bg);backdrop-filter:saturate(180%) blur(14px);-webkit-backdrop-filter:saturate(180%) blur(14px);border-bottom:1px solid var(--line)}
+.bar{display:flex;align-items:center;gap:10px;height:64px}
+.logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:1.08rem;color:var(--text);text-decoration:none;letter-spacing:-.01em;margin-right:auto}
+.logo svg{width:32px;height:32px}
+nav ul{display:none}
+nav.open ul{display:flex;flex-direction:column;position:absolute;left:0;right:0;top:64px;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 20px 18px;box-shadow:var(--shadow)}
+nav a{display:block;padding:12px 4px;color:var(--text);text-decoration:none;font-weight:500}
+nav a:hover{color:var(--accent-text)}
+.ib{display:inline-flex;align-items:center;justify-content:center;min-width:44px;height:44px;padding:0 12px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--text);font:600 .85rem Inter,system-ui,sans-serif;cursor:pointer}
+.ib:hover{border-color:var(--accent)}
+.ib .i{width:20px;height:20px}
+#menuBtn .x{display:none}nav.open ~ .ctl #menuBtn .x{display:block}nav.open ~ .ctl #menuBtn .m{display:none}
+.ctl{display:flex;gap:8px;align-items:center}
+@media(min-width:960px){nav ul,nav.open ul{display:flex;flex-direction:row;position:static;background:none;border:0;padding:0;box-shadow:none;gap:6px}nav a{padding:8px 12px;border-radius:10px}#menuBtn{display:none}.bar{gap:24px}.logo{margin-right:0}nav{margin-right:auto}}
+/* buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;padding:14px 24px;border-radius:14px;font-weight:600;font-size:1rem;text-decoration:none;border:1px solid transparent;transition:transform .2s,box-shadow .2s;min-height:48px}
+.btn-p{background:var(--grad);color:#fff;box-shadow:0 10px 24px rgba(79,70,229,.35)}
+.btn-p:hover{transform:translateY(-2px);box-shadow:0 14px 30px rgba(79,70,229,.45)}
+.btn-g{background:var(--card);color:var(--text);border-color:var(--line)}
+.btn-g:hover{border-color:var(--accent);transform:translateY(-2px)}
+/* hero */
+.hero{position:relative;overflow:hidden;padding:48px 0 72px}
+.hero::before,.hero::after{content:"";position:absolute;border-radius:50%;filter:blur(80px);opacity:.35;z-index:0;pointer-events:none}
+.hero::before{width:420px;height:420px;background:#4F46E5;top:-140px;right:-100px}
+.hero::after{width:360px;height:360px;background:#2563EB;bottom:-160px;left:-120px;opacity:.22}
+.hero .wrap{position:relative;z-index:1;display:grid;gap:48px;align-items:center}
+.badge{display:inline-block;padding:6px 14px;border-radius:99px;background:var(--soft);color:var(--accent-text);font-weight:600;font-size:.85rem;margin-bottom:20px}
+h1{font-size:clamp(2.2rem,6.2vw,3.9rem);line-height:1.06;letter-spacing:-.035em;font-weight:800}
+.grad{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;display:block}
+:root[data-theme=dark] .grad{background:linear-gradient(135deg,#A5B4FC,#7DB1FF);-webkit-background-clip:text;background-clip:text}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]) .grad{background:linear-gradient(135deg,#A5B4FC,#7DB1FF);-webkit-background-clip:text;background-clip:text}}
+.sub{font-size:clamp(1.05rem,2.4vw,1.25rem);color:var(--muted);margin:22px 0 32px;max-width:36em}
+.cta{display:flex;flex-wrap:wrap;gap:12px}
+.hv{display:flex;flex-direction:column;align-items:center;gap:14px}
+.note{font-size:.82rem;color:var(--muted);text-align:center}
+@media(min-width:960px){.hero{padding:80px 0 100px}.hero .wrap{grid-template-columns:1.1fr .9fr}}
+/* phone */
+.phone{font-size:14px;width:20em;aspect-ratio:9/19;border-radius:3em;padding:.65em;background:#0b0d16;box-shadow:var(--shadow-lg),inset 0 0 0 .12em #2a2f45;position:relative;flex:none}
+.screen{height:100%;border-radius:2.4em;background:var(--s-bg);color:var(--s-text);overflow:hidden;padding:1em 1.1em;display:flex;flex-direction:column;gap:.75em;position:relative}
+.island{position:absolute;top:.75em;left:50%;transform:translateX(-50%);width:5.6em;height:1.5em;background:#000;border-radius:1em;z-index:2}
+.sbar{display:flex;justify-content:space-between;font-size:.72em;font-weight:700;padding:.2em .5em 0}
+.ptitle{font-size:1.25em;font-weight:800;letter-spacing:-.02em;display:flex;align-items:center;gap:.5em;margin-top:.3em}
+.ptitle .i{width:1.1em;height:1.1em;color:var(--s-a1)}
+.pc{background:var(--s-card);border-radius:1.3em;padding:.9em 1em;box-shadow:0 .2em .8em rgba(0,0,0,.06)}
+.pl{font-size:.7em;color:var(--s-muted);font-weight:600;text-transform:uppercase;letter-spacing:.06em}
+.pv{font-size:.95em;font-weight:700;margin:.2em 0 .6em}
+.track{height:.7em;border-radius:1em;background:var(--s-track);overflow:hidden}
+.fill{height:100%;width:59%;border-radius:1em;background:linear-gradient(90deg,var(--s-a1),var(--s-a2))}
+.pm{font-size:.72em;color:var(--s-muted);margin-top:.6em}
+.ringc{text-align:center;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.3em}
+.ring{width:8em;height:8em;position:relative}
+.ring svg{width:100%;height:100%}
+.ring b{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:1.7em;font-weight:800}
+.pbtn{margin-top:auto;border-radius:1.1em;padding:.95em;text-align:center;font-weight:700;font-size:.95em;color:#fff;background:linear-gradient(135deg,var(--s-a1),var(--s-a2))}
+.sk-classic{--s-bg:#F2F4FB;--s-card:#fff;--s-text:#0F172A;--s-muted:#5B6478;--s-track:#E4E8F5;--s-a1:#4F46E5;--s-a2:#2563EB}
+.sk-sunset{--s-bg:#FFF3EA;--s-card:#fff;--s-text:#3B1D12;--s-muted:#8A5A48;--s-track:#FBE0D0;--s-a1:#F97316;--s-a2:#DB2777}
+.sk-forest{--s-bg:#0E1D16;--s-card:#162B21;--s-text:#E6F5EC;--s-muted:#9CBFAB;--s-track:#244636;--s-a1:#34D399;--s-a2:#0EA5A4}
+.sk-forest .pbtn{color:#04120B}
+/* sections */
+section{padding:72px 0}
+.alt{background:var(--bg2)}
+.eyebrow{color:var(--accent-text);font-weight:700;font-size:.85rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px}
+h2{font-size:clamp(1.7rem,4.2vw,2.6rem);line-height:1.15;letter-spacing:-.025em;font-weight:800;max-width:20em}
+.lead{color:var(--muted);font-size:1.08rem;margin-top:14px;max-width:40em}
+.sh{margin-bottom:40px}
+/* strip */
+.strip{padding:0 0 24px;margin-top:-8px}
+.strip ul{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.strip li{display:flex;gap:12px;align-items:center;padding:16px;border:1px solid var(--line);border-radius:18px;background:var(--card);box-shadow:var(--shadow)}
+.strip strong{display:block;font-size:.95rem;line-height:1.25}
+.strip span.d{font-size:.8rem;color:var(--muted);line-height:1.3;display:block}
+.ico{width:44px;height:44px;border-radius:14px;background:var(--soft);color:var(--accent-text);display:flex;align-items:center;justify-content:center;flex:none}
+.ico .i{width:22px;height:22px}
+@media(min-width:900px){.strip ul{grid-template-columns:repeat(4,1fr)}}
+/* cards */
+.grp{margin-top:36px}.grp:first-of-type{margin-top:0}
+.grp h3{font-size:1.1rem;margin-bottom:16px;color:var(--accent-text);letter-spacing:-.01em}
+.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow);transition:transform .25s,border-color .25s}
+.card:hover{transform:translateY(-3px);border-color:var(--accent)}
+.card h4{margin:16px 0 6px;font-size:1.05rem;letter-spacing:-.01em}
+.card p{color:var(--muted);font-size:.95rem}
+/* steps */
+.steps{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));counter-reset:s}
+.steps li{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;box-shadow:var(--shadow);counter-increment:s}
+.steps li::before{content:counter(s);display:flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:50%;background:var(--grad);color:#fff;font-weight:800;margin-bottom:16px}
+.steps h3{font-size:1.08rem;margin-bottom:6px}.steps p{color:var(--muted);font-size:.95rem}
+/* themes */
+.themes{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:36px 20px;justify-items:center}
+.themes figure{margin:0;display:flex;flex-direction:column;align-items:center;gap:18px}
+.themes .phone{font-size:12px}
+.themes figcaption{font-weight:700}
+/* privacy */
+.two{display:grid;gap:36px;align-items:start}
+@media(min-width:900px){.two{grid-template-columns:1fr 1fr;gap:56px}}
+.checks{display:grid;gap:14px}
+.checks li{display:flex;gap:14px;padding:18px;border:1px solid var(--line);border-radius:18px;background:var(--card)}
+.checks .ico{width:40px;height:40px;border-radius:12px}
+.checks h3{font-size:1rem;margin-bottom:2px}.checks p{color:var(--muted);font-size:.93rem}
+/* install */
+.ins{display:grid;gap:20px}
+@media(min-width:800px){.ins{grid-template-columns:1fr 1fr}}
+.ibox{background:var(--card);border:1px solid var(--line);border-radius:24px;padding:28px;box-shadow:var(--shadow)}
+.ibox h3{font-size:1.2rem;margin-bottom:18px}
+.ibox ol{counter-reset:n;display:grid;gap:14px}
+.ibox li{counter-increment:n;display:flex;gap:14px;color:var(--muted)}
+.ibox li::before{content:counter(n);flex:none;width:28px;height:28px;border-radius:50%;background:var(--soft);color:var(--accent-text);font-weight:700;font-size:.85rem;display:flex;align-items:center;justify-content:center;margin-top:1px}
+.ibox li b{color:var(--text)}
+.irepo{margin-top:28px;display:flex;flex-wrap:wrap;gap:16px;align-items:center}
+.irepo p{color:var(--muted);font-size:.95rem;max-width:34em}
+/* know */
+.know{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.know li{padding:22px;border-radius:20px;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent)}
+.know h3{font-size:1.02rem;margin-bottom:6px}.know p{color:var(--muted);font-size:.95rem}
+/* faq */
+.faq{max-width:820px;display:grid;gap:12px}
+details{background:var(--card);border:1px solid var(--line);border-radius:18px;overflow:hidden}
+details[open]{border-color:var(--accent)}
+summary{cursor:pointer;list-style:none;padding:18px 20px;font-weight:600;display:flex;justify-content:space-between;align-items:center;gap:14px;min-height:56px}
+summary::-webkit-details-marker{display:none}
+summary .i{transition:transform .25s;color:var(--accent-text)}
+details[open] summary .i{transform:rotate(180deg)}
+details p{padding:0 20px 20px;color:var(--muted)}
+/* footer */
+footer{border-top:1px solid var(--line);padding:36px 0;color:var(--muted);font-size:.92rem}
+footer .wrap{display:flex;flex-wrap:wrap;gap:14px 28px;justify-content:space-between;align-items:center}
+footer b{color:var(--text)}
+/* reveal */
+.js .reveal{opacity:0;transform:translateY(18px);transition:opacity .6s ease,transform .6s ease}
+.js .reveal.in{opacity:1;transform:none}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important;animation:none!important}.js .reveal{opacity:1;transform:none}}
+noscript p{padding:12px 20px;background:var(--soft);text-align:center}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></symbol>
+<symbol id="i-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+<symbol id="i-filter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></symbol>
+<symbol id="i-drive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+<symbol id="i-battery" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="13" x2="23" y2="11"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></symbol>
+<symbol id="i-retry" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+<symbol id="i-palette" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></symbol>
+<symbol id="i-cloudoff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22.61 16.95A5 5 0 0 0 18 10h-1.26a8 8 0 0 0-7.05-6M5 5a8 8 0 0 0 4 15h9a5 5 0 0 0 1.7-.3"/><line x1="1" y1="1" x2="23" y2="23"/></symbol>
+<symbol id="i-gift" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 12 20 22 4 22 4 12"/><rect x="2" y="7" width="20" height="5"/><line x1="12" y1="22" x2="12" y2="7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></symbol>
+<symbol id="i-code" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></symbol>
+</defs></svg>
+
+<a class="skip" href="#main" data-i="skip"></a>
+<noscript><p>Ta strona wymaga JavaScriptu do wyświetlenia treści. / This page needs JavaScript to display its content.</p></noscript>
+
+<header>
+<div class="wrap bar">
+  <a class="logo" href="#top" aria-label="USB Backup">
+    <svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="16" fill="#4F46E5"/><path d="M32 14v26M22 30l10 10 10-10M20 48h24" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    USB Backup
+  </a>
+  <nav id="nav" aria-label="Główna nawigacja">
+    <ul>
+      <li><a href="#features" data-i="nav_features"></a></li>
+      <li><a href="#how" data-i="nav_how"></a></li>
+      <li><a href="#privacy" data-i="nav_privacy"></a></li>
+      <li><a href="#install" data-i="nav_install"></a></li>
+      <li><a href="#faq" data-i="nav_faq"></a></li>
+    </ul>
+  </nav>
+  <div class="ctl">
+    <button class="ib" id="langBtn" type="button"></button>
+    <button class="ib" id="themeBtn" type="button"><svg class="i" aria-hidden="true"><use id="themeUse" href="#i-moon"/></svg></button>
+    <button class="ib" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav"><svg class="i m" aria-hidden="true"><use href="#i-menu"/></svg><svg class="i x" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+</div>
+</header>
+
+<main id="main">
+<div id="top" class="hero">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="badge" data-i="hero_badge"></span>
+      <h1><span data-i="h1a"></span> <span class="grad" data-i="h1b"></span></h1>
+      <p class="sub" data-i="hero_sub"></p>
+      <div class="cta">
+        <a class="btn btn-p" href="#install" data-i="cta_install"></a>
+        <a class="btn btn-g" data-gh href="#" rel="noopener"><svg class="i" aria-hidden="true"><use href="#i-code"/></svg>GitHub</a>
+      </div>
+    </div>
+    <div class="hv reveal" id="heroPhone"></div>
+  </div>
+</div>
+
+<div class="strip"><div class="wrap"><ul id="strip"></ul></div></div>
+
+<section id="features"><div class="wrap">
+  <div class="sh reveal"><p class="eyebrow" data-i="feat_eyebrow"></p><h2 data-i="feat_h2"></h2><p class="lead" data-i="feat_lead"></p></div>
+  <div id="featList"></div>
+</div></section>
+
+<section id="how" class="alt"><div class="wrap">
+  <div class="sh reveal"><p class="eyebrow" data-i="how_eyebrow"></p><h2 data-i="how_h2"></h2><p class="lead" data-i="how_lead"></p></div>
+  <ol class="steps" id="steps"></ol>
+</div></section>
+
+<section id="themes"><div class="wrap">
+  <div class="sh reveal"><p class="eyebrow" data-i="th_eyebrow"></p><h2 data-i="th_h2"></h2><p class="lead" data-i="th_lead"></p></div>
+  <div class="themes" id="themeList"></div>
+</div></section>
+
+<section id="privacy" class="alt"><div class="wrap two">
+  <div class="reveal"><p class="eyebrow" data-i="pr_eyebrow"></p><h2 data-i="pr_h2"></h2><p class="lead" data-i="pr_lead"></p>
+    <p class="irepo" style="margin-top:24px"><a class="btn btn-g" data-gh href="#" rel="noopener"><svg class="i" aria-hidden="true"><use href="#i-code"/></svg><span data-i="pr_btn"></span></a></p></div>
+  <ul class="checks" id="priv"></ul>
+</div></section>
+
+<section id="install"><div class="wrap">
+  <div class="sh reveal"><p class="eyebrow" data-i="in_eyebrow"></p><h2 data-i="in_h2"></h2><p class="lead" data-i="in_lead"></p></div>
+  <div class="ins">
+    <div class="ibox reveal"><h3 data-i="win_h"></h3><ol id="winList"></ol></div>
+    <div class="ibox reveal"><h3 data-i="mac_h"></h3><ol id="macList"></ol></div>
+  </div>
+  <div class="irepo reveal"><a class="btn btn-p" data-gh href="#" rel="noopener"><svg class="i" aria-hidden="true"><use href="#i-code"/></svg><span data-i="in_btn"></span></a><p data-i="in_note"></p></div>
+</div></section>
+
+<section id="know" class="alt"><div class="wrap">
+  <div class="sh reveal"><p class="eyebrow" data-i="kn_eyebrow"></p><h2 data-i="kn_h2"></h2><p class="lead" data-i="kn_lead"></p></div>
+  <ul class="know" id="knowList"></ul>
+</div></section>
+
+<section id="faq"><div class="wrap">
+  <div class="sh reveal"><p class="eyebrow">FAQ</p><h2 data-i="faq_h2"></h2></div>
+  <div class="faq" id="faqList"></div>
+</div></section>
+</main>
+
+<footer><div class="wrap">
+  <div><b>USB Backup</b> · <span data-i="foot_text"></span> · © <span id="yr">2026</span></div>
+  <a data-gh href="#" rel="noopener">GitHub</a>
+</div></footer>
+
+<script>
+(function(){
+"use strict";
+/* >>> PODMIEŃ adres repozytorium (jedyne miejsce w pliku) <<< */
+var REPO="https://github.com/davidfraczek/usb-backup";
+
+var D={
+pl:{
+ skip:"Przejdź do treści",nav_features:"Funkcje",nav_how:"Jak to działa",nav_privacy:"Prywatność",nav_install:"Instalacja",nav_faq:"FAQ",
+ lang_btn:"EN",lang_aria:"Switch language to English",theme_aria:"Przełącz jasny/ciemny motyw",menu_aria:"Menu",
+ title:"USB Backup – kopia zdjęć z iPhone’a na pendrive lub dysk SSD",
+ hero_badge:"Darmowa · iOS 17+ · poza App Store",h1a:"Kopia zdjęć z iPhone’a na pendrive.",h1b:"Bez chmury i abonamentu.",
+ hero_sub:"USB Backup robi przyrostową kopię zdjęć i filmów z biblioteki Zdjęć prosto na pendrive lub dysk SSD podłączony do telefonu. Bez kont, bez serwerów.",
+ cta_install:"Zobacz jak zainstalować",hero_note:"Wizualizacja poglądowa, nie zrzut ekranu aplikacji.",
+ mk_disk:"Dysk",mk_free:"412 GB wolne z 1 TB",mk_meta:"Ostatnia kopia: wczoraj",mk_prog:"Postęp kopii",mk_eta:"ok. 12 min do końca",mk_start:"Rozpocznij kopię",
+ strip:[["Bez chmury","Dane zostają u Ciebie"],["Oryginały bez zmian","EXIF, GPS, RAW, ProRes"],["Kopia przyrostowa","Tylko nowe pliki"],["Darmowa","Bez abonamentu"]],
+ feat_eyebrow:"Funkcje",feat_h2:"Wszystko, czego potrzeba do kopii na dysk",feat_lead:"Aplikacja robi jedną rzecz: bezpiecznie przenosi zdjęcia i filmy z iPhone’a na dysk USB.",
+ groups:["Kopia","Porządek","Bezpieczeństwo","Wygoda"],
+ feat:[
+  ["Kopia przyrostowa","Kopiuje tylko to, czego jeszcze nie ma na dysku, więc kolejne kopie są szybkie."],
+  ["Oryginały bez zmian","Zachowane EXIF, data, GPS, RAW (w tym ProRAW) i ProRes. Live Photo jako para HEIC/JPG + MOV, edytowane wersje opcjonalnie jako „_edited”."],
+  ["Oryginały z iCloud","Jeśli oryginał jest tylko w chmurze, aplikacja pobiera go w pełnej jakości przed zapisem (przez sieć komórkową tylko za zgodą)."],
+  ["Weryfikacja po zapisie","Sprawdzany jest rozmiar każdego pliku. Uszkodzony plik jest usuwany i kopiowany ponownie."],
+  ["Układ folderów","2026-10/, 2026/10/ albo 2026/10/14/. Opcjonalny podział na Camera / Screenshots / Other lub tylko zrzuty ekranu osobno."],
+  ["Filtry","Zdjęcia lub filmy, zakres dat, wybór albumów (tylko wybrane lub pomiń wybrane), tylko z aparatu (przybliżenie)."],
+  ["Albumy i ulubione","Zapisywane do pliku albums.json na dysku."],
+  ["Informacje o dysku","Wolne miejsce, rozmiar folderu z kopią, szacunek nowej kopii, data ostatniej kopii i wykres pojemności."],
+  ["Blokada aplikacji","Dostęp chroniony 4-cyfrowym PIN-em i Face ID."],
+  ["Bateria i miejsce","Ostrzeżenie o niskiej baterii oraz blokada przy braku miejsca na dysku."],
+  ["Log błędów","Eksport logu błędów, bez zdjęć i lokalizacji."],
+  ["Pauza i wznowienie","Czas do końca z godziną zakończenia kopii."],
+  ["Spróbuj ponownie","Jednym przyciskiem ponowisz kopiowanie błędnych plików."],
+  ["Powiadomienia","Informacja o końcu kopii i przypomnienie o kopii po 7, 14 lub 30 dniach."],
+  ["Historia kopii","Ostatnie 30 kopii, zapisane na dysku."],
+  ["Motywy i języki","Trzy motywy kolorystyczne (Klasyczny, Zachód słońca, Las), język polski i angielski."]
+ ],
+ how_eyebrow:"Jak to działa",how_h2:"Cztery kroki od telefonu do dysku",how_lead:"Kolejne kopie są szybkie, bo aplikacja pomija to, co już jest na dysku.",
+ steps:[["Podłącz dysk","Pendrive lub dysk SSD przez USB-C albo Lightning z adapterem."],["Wybierz folder","Wskaż miejsce na dysku, układ folderów i ewentualne filtry."],["Rozpocznij kopię","Aplikacja kopiuje nowe zdjęcia i filmy. Możesz wstrzymać i wznowić."],["Gotowe i zweryfikowane","Po zapisie sprawdzany jest rozmiar każdego pliku, a błędne są kopiowane ponownie."]],
+ th_eyebrow:"Motywy i wygląd",th_h2:"Trzy motywy kolorystyczne",th_lead:"Wybierz styl, który Ci odpowiada. Poniżej wizualizacje poglądowe.",
+ th_names:["Klasyczny","Zachód słońca","Las"],
+ pr_eyebrow:"Prywatność",pr_h2:"Twoje zdjęcia zostają na telefonie i dysku",pr_lead:"Aplikacja nie ma żadnego zaplecza. Zdjęcia trafiają z biblioteki Zdjęć prosto na podłączony dysk i nigdzie indziej.",pr_btn:"Zobacz kod w repozytorium",
+ priv:[["Bez serwerów i kont","Nie ma logowania ani serwera. Aplikacja nie wysyła żadnych danych w internet."],["Prosto na Twój dysk","Kopia powstaje na pendrive lub dysku SSD, który trzymasz u siebie."],["Kod do wglądu","Kod źródłowy jest w repozytorium na GitHubie, więc możesz sprawdzić, co robi aplikacja."],["Log bez danych osobistych","Eksportowany log błędów nie zawiera zdjęć ani lokalizacji."],["Blokada PIN-em i Face ID","Możesz zabezpieczyć dostęp do aplikacji."]],
+ in_eyebrow:"Instalacja",in_h2:"Instalacja we własnym zakresie",in_lead:"Aplikacji nie ma w App Store. Instalujesz ją samodzielnie z darmowym Apple ID, a podpis trzeba odnawiać co 7 dni.",
+ win_h:"Komputer z Windows",mac_h:"Mac",
+ win:["Pobierz plik <b>.ipa</b> zbudowany w GitHub Actions w repozytorium.","Zainstaluj na komputerze <b>iTunes</b> oraz <b>Sideloadly</b>.","Podłącz iPhone’a kablem do komputera.","W Sideloadly wskaż plik .ipa, zaloguj się <b>darmowym Apple ID</b> i uruchom instalację.","Odnawiaj podpis co 7 dni."],
+ mac:["Pobierz projekt z repozytorium.","Otwórz go w <b>Xcode</b>.","Wybierz swój zespół podpisywania na <b>darmowym Apple ID</b> i podłączonego iPhone’a.","Uruchom aplikację na telefonie.","Odnawiaj podpis co 7 dni."],
+ in_btn:"Przejdź do repozytorium",in_note:"Aktualne pliki i szczegóły znajdziesz w repozytorium projektu.",
+ kn_eyebrow:"Dobrze wiedzieć",kn_h2:"Ograniczenia, o których warto wiedzieć",kn_lead:"Wolimy powiedzieć o nich wprost, zanim zaczniesz.",
+ know:[["Tylko samodzielna instalacja","Aplikacji nie ma w App Store. Instaluje się ją plikiem .ipa z GitHub Actions i Sideloadly (Windows) albo Xcode (Mac), z darmowym Apple ID. Podpis trzeba odnawiać co 7 dni."],["Aplikacja musi być na ekranie","Kopia działa tylko wtedy, gdy aplikacja jest na ekranie, bo iOS zawiesza aplikacje w tle."],["Format dysku","Używaj exFAT albo APFS. FAT32 nie przyjmie plików powyżej 4 GB, a NTFS jest na iOS tylko do odczytu."],["Weryfikacja po rozmiarze","Weryfikacja porównuje rozmiary plików, nie sumy kontrolne."],["Projekt na własny użytek","Powstał z pomocą Claude. Zanim zaczniesz polegać na kopii, zrób próbę na małej partii zdjęć."]],
+ faq_h2:"Najczęstsze pytania",
+ faq:[
+  ["Czy kopia działa w tle?","Nie. Kopia działa tylko wtedy, gdy aplikacja jest na ekranie, bo iOS zawiesza aplikacje w tle. Na czas kopii zostaw telefon z włączoną aplikacją."],
+  ["Co z iCloud?","Jeśli oryginał jest tylko w chmurze, aplikacja pobiera go w pełnej jakości przed zapisem na dysk. Przez sieć komórkową robi to tylko za Twoją zgodą."],
+  ["Czy aplikacja kasuje zdjęcia z telefonu?","Nie, nigdy. Aplikacja tylko kopiuje zdjęcia i filmy na dysk."],
+  ["Jaki format dysku wybrać?","exFAT albo APFS. FAT32 nie przyjmie plików powyżej 4 GB, a NTFS jest na iOS tylko do odczytu."],
+  ["Co po 7 dniach?","Podpis z darmowym Apple ID wygasa po 7 dniach. Trzeba go odnowić, instalując aplikację ponownie tą samą metodą (Sideloadly lub Xcode). Kopie na dysku to osobne pliki."],
+  ["Co po zmianie telefonu?","Zainstaluj aplikację na nowym telefonie i podłącz ten sam dysk. Historia kopii i albums.json są zapisane na dysku, a kopia przyrostowa pomija to, co już tam jest. Na początek sprawdź to na małej partii."]
+ ],
+ foot_text:"Projekt prywatny, bez licencji, nie jest powiązany z Apple"
+},
+en:{
+ skip:"Skip to content",nav_features:"Features",nav_how:"How it works",nav_privacy:"Privacy",nav_install:"Installation",nav_faq:"FAQ",
+ lang_btn:"PL",lang_aria:"Przełącz na polski",theme_aria:"Toggle light/dark theme",menu_aria:"Menu",
+ title:"USB Backup – back up your iPhone photos to a USB drive or SSD",
+ hero_badge:"Free · iOS 17+ · not on the App Store",h1a:"Back up iPhone photos to a USB drive.",h1b:"No cloud, no subscription.",
+ hero_sub:"USB Backup makes an incremental backup of your photos and videos from the Photos library straight to a flash drive or SSD connected to your phone. No accounts, no servers.",
+ cta_install:"See how to install",hero_note:"Illustrative mockup, not a screenshot of the app.",
+ mk_disk:"Drive",mk_free:"412 GB free of 1 TB",mk_meta:"Last backup: yesterday",mk_prog:"Backup progress",mk_eta:"about 12 min left",mk_start:"Start backup",
+ strip:[["No cloud","Your data stays with you"],["Originals untouched","EXIF, GPS, RAW, ProRes"],["Incremental backup","Only new files"],["Free","No subscription"]],
+ feat_eyebrow:"Features",feat_h2:"Everything you need to back up to a drive",feat_lead:"The app does one thing: it safely moves photos and videos from your iPhone to a USB drive.",
+ groups:["Backup","Organization","Safety","Convenience"],
+ feat:[
+  ["Incremental backup","Copies only what is not on the drive yet, so later backups are fast."],
+  ["Originals untouched","EXIF, date, GPS, RAW (including ProRAW) and ProRes are preserved. Live Photos are saved as a HEIC/JPG + MOV pair, edited versions optionally as “_edited”."],
+  ["iCloud originals","If the original exists only in the cloud, the app downloads it in full quality before saving (over cellular only with your consent)."],
+  ["Verification after saving","The size of every file is checked. A damaged file is deleted and copied again."],
+  ["Folder layout","2026-10/, 2026/10/ or 2026/10/14/. Optional split into Camera / Screenshots / Other, or screenshots only as a separate folder."],
+  ["Filters","Photos or videos, date range, album selection (only selected or skip selected), camera-only (approximate)."],
+  ["Albums and favorites","Saved to an albums.json file on the drive."],
+  ["Drive information","Free space, size of the backup folder, estimate of the new backup, date of the last backup and a capacity chart."],
+  ["App lock","Access protected with a 4-digit PIN and Face ID."],
+  ["Battery and space","Low-battery warning and a block when there is not enough space on the drive."],
+  ["Error log","Export an error log, without photos or locations."],
+  ["Pause and resume","Time remaining with the expected finish time."],
+  ["Try again","Retry copying failed files with one button."],
+  ["Notifications","Alert when a backup finishes and a reminder to back up after 7, 14 or 30 days."],
+  ["Backup history","The last 30 backups, stored on the drive."],
+  ["Themes and languages","Three color themes (Classic, Sunset, Forest), Polish and English."]
+ ],
+ how_eyebrow:"How it works",how_h2:"Four steps from phone to drive",how_lead:"Later backups are fast because the app skips what is already on the drive.",
+ steps:[["Connect the drive","A flash drive or SSD over USB-C, or Lightning with an adapter."],["Choose a folder","Pick the place on the drive, the folder layout and any filters."],["Start the backup","The app copies new photos and videos. You can pause and resume."],["Done and verified","After saving, every file size is checked and bad files are copied again."]],
+ th_eyebrow:"Themes and looks",th_h2:"Three color themes",th_lead:"Pick the style you like. Below are illustrative mockups.",
+ th_names:["Classic","Sunset","Forest"],
+ pr_eyebrow:"Privacy",pr_h2:"Your photos stay on your phone and your drive",pr_lead:"The app has no backend. Photos go from the Photos library straight to the connected drive and nowhere else.",pr_btn:"View the code in the repository",
+ priv:[["No servers, no accounts","There is no login and no server. The app does not send any data over the internet."],["Straight to your drive","The backup is made on a flash drive or SSD that you keep yourself."],["Code you can inspect","The source code is in the GitHub repository, so you can check what the app does."],["Log without personal data","The exported error log contains no photos or locations."],["PIN and Face ID lock","You can protect access to the app."]],
+ in_eyebrow:"Installation",in_h2:"Install it yourself",in_lead:"The app is not on the App Store. You install it yourself with a free Apple ID, and the signature has to be renewed every 7 days.",
+ win_h:"Windows PC",mac_h:"Mac",
+ win:["Download the <b>.ipa</b> file built by GitHub Actions in the repository.","Install <b>iTunes</b> and <b>Sideloadly</b> on your computer.","Connect your iPhone to the computer with a cable.","In Sideloadly, select the .ipa file, sign in with a <b>free Apple ID</b> and start the installation.","Renew the signature every 7 days."],
+ mac:["Download the project from the repository.","Open it in <b>Xcode</b>.","Choose your signing team using a <b>free Apple ID</b> and your connected iPhone.","Run the app on the phone.","Renew the signature every 7 days."],
+ in_btn:"Go to the repository",in_note:"Current files and details are in the project repository.",
+ kn_eyebrow:"Good to know",kn_h2:"Limitations worth knowing about",kn_lead:"We would rather say them plainly before you start.",
+ know:[["Self-install only","The app is not on the App Store. You install it with an .ipa file from GitHub Actions and Sideloadly (Windows) or Xcode (Mac), using a free Apple ID. The signature has to be renewed every 7 days."],["The app must be on screen","Backup works only while the app is on screen, because iOS suspends apps in the background."],["Drive format","Use exFAT or APFS. FAT32 cannot take files over 4 GB, and NTFS is read-only on iOS."],["Verification by size","Verification compares file sizes, not checksums."],["A personal project","It was built with the help of Claude. Before you rely on a backup, try it on a small batch of photos."]],
+ faq_h2:"Frequently asked questions",
+ faq:[
+  ["Does the backup run in the background?","No. Backup works only while the app is on screen, because iOS suspends apps in the background. Keep the app open on your phone during the backup."],
+  ["What about iCloud?","If the original exists only in the cloud, the app downloads it in full quality before writing it to the drive. It does this over cellular only with your consent."],
+  ["Does it delete photos from my phone?","No, never. The app only copies photos and videos to the drive."],
+  ["Which drive format should I use?","exFAT or APFS. FAT32 cannot take files over 4 GB, and NTFS is read-only on iOS."],
+  ["What happens after 7 days?","The signature from a free Apple ID expires after 7 days. You renew it by installing the app again with the same method (Sideloadly or Xcode). Backups on the drive are separate files."],
+  ["What if I change phones?","Install the app on the new phone and connect the same drive. The backup history and albums.json are stored on the drive, and incremental backup skips what is already there. Try it on a small batch first."]
+ ],
+ foot_text:"Private project, unlicensed, not affiliated with Apple"
+}};
+
+var $=function(s,r){return (r||document).querySelector(s)},$$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
+function store(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
+function ico(n){return '<svg class="i" aria-hidden="true"><use href="#i-'+n+'"/></svg>'}
+var lang=store('ub-lang');if(lang!=='pl'&&lang!=='en')lang=((navigator.language||'en').toLowerCase().indexOf('pl')===0)?'pl':'en';
+
+/* mockup telefonu */
+function phone(skin){
+ return '<div class="phone sk-'+skin+'" role="img" aria-label="USB Backup"><div class="island"></div><div class="screen">'+
+ '<div class="sbar"><span>9:41</span><span>●●●</span></div>'+
+ '<div class="ptitle">'+ico('download')+'USB Backup</div>'+
+ '<div class="pc"><div class="pl" data-i="mk_disk"></div><div class="pv" data-i="mk_free"></div><div class="track"><div class="fill"></div></div><div class="pm" data-i="mk_meta"></div></div>'+
+ '<div class="pc ringc"><div class="ring"><svg viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="42" fill="none" stroke="var(--s-track)" stroke-width="9"/><circle cx="50" cy="50" r="42" fill="none" stroke="var(--s-a1)" stroke-width="9" stroke-linecap="round" stroke-dasharray="263.9" stroke-dashoffset="95" transform="rotate(-90 50 50)"/></svg><b>64%</b></div><div class="pl" data-i="mk_prog"></div><div class="pm" style="margin:0" data-i="mk_eta"></div></div>'+
+ '<div class="pbtn" data-i="mk_start"></div></div></div>';
+}
+$('#heroPhone').innerHTML=phone('classic')+'<p class="note" data-i="hero_note"></p>';
+
+var io=null,first=true;
+if('IntersectionObserver' in window){io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}})},{threshold:.12});}
+function reveal(root){$$('.reveal',root).forEach(function(el){if(el.classList.contains('in'))return;if(io&&first)io.observe(el);else el.classList.add('in')})}
+
+function render(){
+ var t=D[lang];
+ document.documentElement.lang=lang;document.title=t.title;
+ $$('[data-i]').forEach(function(el){var v=t[el.getAttribute('data-i')];if(v!==undefined)el.textContent=v});
+ $$('[data-gh]').forEach(function(a){a.href=REPO});
+ var lb=$('#langBtn');lb.textContent=t.lang_btn;lb.setAttribute('aria-label',t.lang_aria);lb.setAttribute('lang',lang==='pl'?'en':'pl');
+ $('#themeBtn').setAttribute('aria-label',t.theme_aria);$('#menuBtn').setAttribute('aria-label',t.menu_aria);
+ /* pasek atutów */
+ var si=['cloudoff','image','layers','gift'];
+ $('#strip').innerHTML=t.strip.map(function(s,i){return '<li class="reveal"><span class="ico">'+ico(si[i])+'</span><span><strong>'+s[0]+'</strong><span class="d">'+s[1]+'</span></span></li>'}).join('');
+ /* funkcje */
+ var F=[[0,'layers'],[0,'image'],[0,'download'],[0,'check'],[1,'folder'],[1,'filter'],[1,'file'],[1,'drive'],[2,'lock'],[2,'battery'],[2,'file'],[3,'pause'],[3,'retry'],[3,'bell'],[3,'clock'],[3,'palette']];
+ $('#featList').innerHTML=t.groups.map(function(g,gi){
+  var cards=F.map(function(f,i){return f[0]===gi?'<article class="card reveal"><span class="ico">'+ico(f[1])+'</span><h4>'+t.feat[i][0]+'</h4><p>'+t.feat[i][1]+'</p></article>':''}).join('');
+  return '<div class="grp"><h3 class="reveal">'+g+'</h3><div class="grid">'+cards+'</div></div>'}).join('');
+ $('#steps').innerHTML=t.steps.map(function(s){return '<li class="reveal"><h3>'+s[0]+'</h3><p>'+s[1]+'</p></li>'}).join('');
+ var sk=['classic','sunset','forest'];
+ $('#themeList').innerHTML=sk.map(function(k,i){return '<figure class="reveal">'+phone(k)+'<figcaption>'+t.th_names[i]+'</figcaption></figure>'}).join('');
+ var pi=['shield','drive','code','file','lock'];
+ $('#priv').innerHTML=t.priv.map(function(p,i){return '<li class="reveal"><span class="ico">'+ico(pi[i])+'</span><div><h3>'+p[0]+'</h3><p>'+p[1]+'</p></div></li>'}).join('');
+ $('#winList').innerHTML=t.win.map(function(s){return '<li><span>'+s+'</span></li>'}).join('');
+ $('#macList').innerHTML=t.mac.map(function(s){return '<li><span>'+s+'</span></li>'}).join('');
+ $('#knowList').innerHTML=t.know.map(function(k){return '<li class="reveal"><h3>'+k[0]+'</h3><p>'+k[1]+'</p></li>'}).join('');
+ $('#faqList').innerHTML=t.faq.map(function(q){return '<details class="reveal"><summary>'+q[0]+ico('chev')+'</summary><p>'+q[1]+'</p></details>'}).join('');
+ /* zawartość mockupów generowana wyżej – uzupełnij teksty */
+ $$('[data-i]').forEach(function(el){var v=t[el.getAttribute('data-i')];if(v!==undefined)el.textContent=v});
+ reveal(document);first=false;
+}
+
+/* akordeon: otwarcie jednego zamyka pozostałe */
+document.addEventListener('toggle',function(e){var d=e.target;if(d.tagName==='DETAILS'&&d.open){$$('#faqList details').forEach(function(o){if(o!==d)o.open=false})}},true);
+
+/* motyw */
+var mq=window.matchMedia?window.matchMedia('(prefers-color-scheme: dark)'):null;
+function isDark(){var a=document.documentElement.getAttribute('data-theme');return a?a==='dark':!!(mq&&mq.matches)}
+function themeIcon(){$('#themeUse').setAttribute('href',isDark()?'#i-sun':'#i-moon')}
+$('#themeBtn').addEventListener('click',function(){var n=isDark()?'light':'dark';document.documentElement.setAttribute('data-theme',n);store('ub-theme',n);themeIcon()});
+if(mq&&mq.addEventListener)mq.addEventListener('change',themeIcon);
+$('#langBtn').addEventListener('click',function(){lang=lang==='pl'?'en':'pl';store('ub-lang',lang);render()});
+var nav=$('#nav'),mb=$('#menuBtn');
+mb.addEventListener('click',function(){var o=nav.classList.toggle('open');mb.setAttribute('aria-expanded',o)});
+$$('#nav a').forEach(function(a){a.addEventListener('click',function(){nav.classList.remove('open');mb.setAttribute('aria-expanded','false')})});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'&&nav.classList.contains('open')){nav.classList.remove('open');mb.setAttribute('aria-expanded','false');mb.focus()}});
+$('#yr').textContent=new Date().getFullYear();
+themeIcon();render();
+})();
+</script>
+</body>
+</html>
